@@ -1,0 +1,1 @@
+"""Category skill prompt assets."""

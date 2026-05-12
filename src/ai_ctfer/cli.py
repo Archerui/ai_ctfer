@@ -332,6 +332,13 @@ def _print_event(event: str, payload: dict, language) -> None:
         elif payload["exit_code"] != 0:
             console.print("[dim]" + t(language, "command_done_failed", phase=phase) + "[/dim]")
         return
+    if event == "command_skipped":
+        console.print(
+            "[dim]"
+            + t(language, "command_skipped", phase=phase_name(language, payload["phase"]))
+            + "[/dim]"
+        )
+        return
     if event == "plan_ready":
         console.print(f"[cyan]{t(language, 'planning_complete')}[/cyan]")
         return

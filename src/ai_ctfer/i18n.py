@@ -102,26 +102,30 @@ def adjudicator_system(language: Language) -> str:
         return (
             "你是单题 CTF challenge 的最终 flag 裁判。只能从给定候选里选择。优先选择"
             "来自目标输出、解密脚本、辅助脚本或明确成功标签的候选。拒绝示例、占位符、"
-            "flag 格式描述和猜测。严格只返回一个 JSON action，不要输出解释性 prose。"
+            "flag 格式描述、模型猜测、以及未经校验的解密结果。严格只返回一个 JSON action，"
+            "不要输出解释性 prose。"
         )
     return (
         "You are the final flag adjudicator for a single CTF challenge. Choose "
         "only from the provided candidates. Prefer candidates that came from "
         "target output, decrypt scripts, helper scripts, or explicit success "
         "labels. Reject examples, placeholders, flag format descriptions, and "
-        "guesses. Return exactly one JSON action and no prose."
+        "guesses. Also reject unverified decrypt-script outputs unless they have "
+        "round-trip, re-encryption, oracle, or sole-final-output evidence. Return "
+        "exactly one JSON action and no prose."
     )
 
 
 def adjudicator_instruction(language: Language) -> str:
     if language == "zh":
         return (
-            "如果某个候选是真 flag，返回 submit_flag，并使用完全一致的值。"
-            "如果没有可信候选，返回 status 为 give_up 的 finish。"
+            "只有当某个候选有独立可验证证据时，才返回 submit_flag，并使用完全一致的值。"
+            "如果候选只是模型提交或未经校验的解密输出，返回 status 为 give_up 的 finish。"
         )
     return (
-        "If one candidate is the real flag, return submit_flag with that exact "
-        "value. If none is trustworthy, return finish with status give_up."
+        "Only return submit_flag with the exact value when a candidate has "
+        "independent verifiable evidence. If candidates are model-only or "
+        "unverified decrypt outputs, return finish with status give_up."
     )
 
 
@@ -188,6 +192,7 @@ _MESSAGES = {
         "command_done_candidates": "{phase}: found {count} flag candidate(s).",
         "command_done_failed": "{phase}: operation did not complete successfully; adjusting.",
         "command_done_timeout": "{phase}: operation timed out; adjusting.",
+        "command_skipped": "{phase}: skipped a repeated command and will pivot.",
         "command_start_brief": "{phase}: {summary}",
         "config_path": "Config file:",
         "current_language": "Current language: {language}",
@@ -242,6 +247,7 @@ _MESSAGES = {
         "command_done_candidates": "{phase}中：发现 {count} 个 flag 候选。",
         "command_done_failed": "{phase}中：这次操作没有成功，继续调整。",
         "command_done_timeout": "{phase}中：这次操作超时，继续调整。",
+        "command_skipped": "{phase}中：跳过重复命令，切换思路。",
         "command_start_brief": "{phase}中：{summary}",
         "config_path": "配置文件：",
         "current_language": "当前语言：{language}",

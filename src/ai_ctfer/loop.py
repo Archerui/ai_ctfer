@@ -19,6 +19,7 @@ from .candidates import (
     FINAL_ACCEPT_CONFIDENCE,
     FlagCandidate,
     FlagCandidateStore,
+    candidate_is_finalizable,
 )
 from .config import Language
 from .executor import DockerExecutor
@@ -35,6 +36,7 @@ from .prompt import (
 from .schema import Challenge
 
 DEFAULT_PLANNING_STEPS = 50
+MAX_EXACT_COMMAND_REPEATS = 2
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 _VISIBLE_TEXT_RE = re.compile(r"[\w\u3400-\u9fff]", re.UNICODE)
 
@@ -93,6 +95,8 @@ class AgentLoop:
         self.on_plan = on_plan
         self.on_event = on_event
         self.language = language
+        self.command_counts: dict[str, int] = {}
+        self.repeated_command_skips = 0
 
     def _emit(self, event: str, **payload: Any) -> None:
         if self.on_event:
@@ -191,6 +195,27 @@ class AgentLoop:
                     return SolveResult("error", self.logger.run_dir, reason=reason)
 
             if isinstance(action, RunCommandAction):
+                if repeated := self._repeated_command_observation(action.command):
+                    self.repeated_command_skips += 1
+                    last_observation = repeated
+                    history.append(
+                        {
+                            "step": step,
+                            "action": "run_command_skipped",
+                            "command": action.command,
+                            "reason": "repeated_command",
+                            "rationale": action.rationale,
+                        }
+                    )
+                    self.logger.log(
+                        "command_skipped",
+                        step=step,
+                        action=action.model_dump(),
+                        reason="repeated_command",
+                    )
+                    self._emit("command_skipped", phase="solve", step=step)
+                    continue
+                self._record_command(action.command)
                 self._emit(
                     "command_start",
                     phase="solve",
@@ -272,7 +297,7 @@ class AgentLoop:
                         step=step,
                         candidate=candidate,
                     )
-                if candidate and candidate.status == "accepted":
+                if candidate and candidate.status == "accepted" and candidate_is_finalizable(candidate):
                     return self._candidate_success(
                         candidate,
                         _message(
@@ -285,13 +310,15 @@ class AgentLoop:
                     _message(
                         self.language,
                         en=(
-                            "The submitted flag did not match the configured/default flag "
-                            "patterns or did not have enough supporting evidence. Continue "
-                            "investigating."
+                            "The submitted flag has been recorded as a candidate, but it is "
+                            "not accepted from model submission alone. Provide independent "
+                            "evidence: target output, a verification script, re-encryption "
+                            "check, oracle acceptance, or a sole final command output."
                         ),
                         zh=(
-                            "提交的 flag 不符合配置或默认 flag 模式，或者支撑证据不足。"
-                            "继续调查。"
+                            "提交的 flag 已记录为候选，但不能仅凭模型提交就接受。"
+                            "请继续提供独立证据：目标输出、验证脚本、重新加密校验、"
+                            "oracle 接受结果，或单独的最终命令输出。"
                         ),
                     )
                 )
@@ -428,6 +455,37 @@ class AgentLoop:
                     continue
 
             if isinstance(action, RunCommandAction):
+                if repeated := self._repeated_command_observation(action.command):
+                    self.repeated_command_skips += 1
+                    last_observation = repeated
+                    record = {
+                        "phase": "planning",
+                        "planning_step": planning_step,
+                        "action": "run_command_skipped",
+                        "command": action.command,
+                        "reason": "repeated_command",
+                        "rationale": action.rationale,
+                    }
+                    planning_history.append(record)
+                    history.append(record)
+                    self.logger.log(
+                        "planning_command_skipped",
+                        planning_step=planning_step,
+                        action=action.model_dump(),
+                        reason="repeated_command",
+                    )
+                    self._emit("command_skipped", phase="planning", step=planning_step)
+                    if self.repeated_command_skips >= 3:
+                        return self._fallback_plan(
+                            planning_history,
+                            _message(
+                                self.language,
+                                en="Planning stopped early because the model repeated the same command.",
+                                zh="模型反复请求同一命令，规划阶段已提前收敛。",
+                            ),
+                        ), last_observation
+                    continue
+                self._record_command(action.command)
                 self._emit(
                     "command_start",
                     phase="planning",
@@ -508,11 +566,27 @@ class AgentLoop:
                         planning_step=planning_step,
                         candidate=candidate,
                     )
-                    if candidate.status == "accepted":
+                    if candidate.status == "accepted" and candidate_is_finalizable(candidate):
                         return (
                             self._planning_submitted_candidate_plan(action.rationale),
                             last_observation,
                         )
+                    if (
+                        candidate.source == "submit_flag"
+                        and candidate.seen_count >= 3
+                        and not candidate_is_finalizable(candidate)
+                    ):
+                        return self._fallback_plan(
+                            planning_history,
+                            _message(
+                                self.language,
+                                en=(
+                                    "Planning stopped early because the model repeatedly "
+                                    "submitted an unsupported flag candidate."
+                                ),
+                                zh="模型反复提交缺少证据的 flag 候选，规划阶段已提前收敛。",
+                            ),
+                        ), last_observation
                 planning_history.append(
                     {
                         "phase": "planning",
@@ -591,6 +665,28 @@ class AgentLoop:
             alternatives=alternatives,
             rationale=rationale,
             fallback=True,
+        )
+
+    def _record_command(self, command: str) -> None:
+        fingerprint = _command_fingerprint(command)
+        self.command_counts[fingerprint] = self.command_counts.get(fingerprint, 0) + 1
+
+    def _repeated_command_observation(self, command: str) -> str | None:
+        fingerprint = _command_fingerprint(command)
+        count = self.command_counts.get(fingerprint, 0)
+        if count < MAX_EXACT_COMMAND_REPEATS:
+            return None
+        return _message(
+            self.language,
+            en=(
+                "This exact command has already been run twice. Do not repeat it; "
+                "use the existing observations, inspect a different file/range, "
+                "write a verifier, or pivot to another hypothesis."
+            ),
+            zh=(
+                "这条完全相同的命令已经运行过两次。不要重复执行；请使用已有观察结果，"
+                "改查不同文件或不同范围，编写验证脚本，或切换到其他假设。"
+            ),
         )
 
     def _planning_found_candidate_plan(self) -> PlanResult:
@@ -796,6 +892,7 @@ class AgentLoop:
         if (
             best.confidence >= FINAL_ACCEPT_CONFIDENCE
             and best.confidence - second_score >= 10
+            and candidate_is_finalizable(best)
         ):
             self.candidates.mark_accepted(
                 best.value,
@@ -837,6 +934,25 @@ class AgentLoop:
                 self.candidates.has_candidate(normalized)
                 and matches_flag(normalized, self.challenge.flag_regex)
             ):
+                target = next(
+                    (
+                        item
+                        for item in self.candidates.visible()
+                        if item.normalized_value == normalized
+                    ),
+                    None,
+                )
+                if target is None or not candidate_is_finalizable(target):
+                    self.logger.log(
+                        "candidate_adjudication_rejected",
+                        submitted=action.flag,
+                        reason=_message(
+                            self.language,
+                            en="candidate lacks independent finalizable evidence",
+                            zh="候选缺少可最终确认的独立证据",
+                        ),
+                    )
+                    return None
                 candidate = self.candidates.mark_accepted(
                     normalized,
                     _message(
@@ -908,3 +1024,7 @@ def _natural_language_fields(
 
 def _message(language: Language, *, en: str, zh: str) -> str:
     return zh if language == "zh" else en
+
+
+def _command_fingerprint(command: str) -> str:
+    return " ".join(command.split())

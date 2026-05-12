@@ -53,6 +53,7 @@ class PromptBuilder:
             "recent_history": history[-self.recent_history_items :],
             "last_observation": last_observation,
             "flag_candidates": flag_candidates or [],
+            "flag_submission_policy": flag_submission_policy(language),
             "remaining_steps": remaining_steps,
             "allowed_actions": action_schema_hint(),
         }
@@ -91,6 +92,7 @@ class PromptBuilder:
             "planning_history": history[-self.recent_history_items :],
             "last_observation": last_observation,
             "flag_candidates": flag_candidates or [],
+            "flag_submission_policy": flag_submission_policy(language),
             "remaining_planning_steps": remaining_planning_steps,
             "allowed_actions": planning_action_schema_hint(),
             "planning_goal": planning_goal(language),
@@ -128,6 +130,7 @@ def build_candidate_adjudication_messages(
                         "flag_candidates": candidates,
                         "recent_history": history[-8:],
                         "last_observation": last_observation,
+                        "flag_submission_policy": flag_submission_policy(language),
                         "instruction": adjudicator_instruction(language),
                     },
                     ensure_ascii=False,
@@ -172,6 +175,24 @@ def skill_for_category(category: Category) -> str:
         Category.UNKNOWN: "unknown.md",
     }
     return mapping[category]
+
+
+def flag_submission_policy(language: Language) -> str:
+    if language == "zh":
+        return (
+            "不要因为字符串长得像 flag 就提交。submit_flag 必须基于独立证据：目标输出、"
+            "验证脚本、重新加密/轮函数校验、oracle 接受、或命令唯一最终输出。"
+            "如果只是解密脚本打印了一个看似 flag 的候选，请先运行校验命令；"
+            "如果候选缺少证据，继续调查而不是提交。"
+        )
+    return (
+        "Do not submit a string just because it matches the flag format. "
+        "submit_flag requires independent evidence: target output, a verifier "
+        "script, re-encryption/round-function check, oracle acceptance, or a "
+        "command whose sole final output is the flag. If a decrypt script only "
+        "prints a flag-looking candidate, run a verification command first; if "
+        "evidence is missing, keep investigating instead of submitting."
+    )
 
 
 def read_prompt(name: str) -> str:

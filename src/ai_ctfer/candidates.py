@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from .flag import find_flags, is_placeholder_flag, matches_flag
 
 
-AUTO_ACCEPT_CONFIDENCE = 80
-FINAL_ACCEPT_CONFIDENCE = 75
+AUTO_ACCEPT_CONFIDENCE = 90
+FINAL_ACCEPT_CONFIDENCE = 90
 
 
 @dataclass
@@ -18,6 +18,7 @@ class FlagCandidate:
     step: int
     confidence: int
     status: str
+    sources: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     command: str | None = None
     context: str = ""
@@ -26,6 +27,8 @@ class FlagCandidate:
     seen_count: int = 1
 
     def __post_init__(self) -> None:
+        if not self.sources:
+            self.sources = [self.source]
         if not self.first_seen_step:
             self.first_seen_step = self.step
         if not self.last_seen_step:
@@ -35,6 +38,7 @@ class FlagCandidate:
         return {
             "value": self.value,
             "source": self.source,
+            "sources": self.sources,
             "confidence": self.confidence,
             "status": self.status,
             "seen_count": self.seen_count,
@@ -110,13 +114,15 @@ class FlagCandidateStore:
         if existing:
             existing.seen_count += 1
             existing.last_seen_step = step
+            if source not in existing.sources:
+                existing.sources.append(source)
             if confidence > existing.confidence:
                 existing.confidence = confidence
                 existing.source = source
                 existing.command = command
                 existing.context = context
             existing.reasons = merge_reasons(existing.reasons, reasons)
-            if status == "accepted":
+            if status == "accepted" and candidate_is_auto_acceptable(existing):
                 existing.status = "accepted"
             return existing
 
@@ -124,6 +130,7 @@ class FlagCandidateStore:
             value=normalized,
             normalized_value=normalized,
             source=source,
+            sources=[source],
             step=step,
             command=command,
             context=context,
@@ -136,7 +143,11 @@ class FlagCandidateStore:
         return candidate
 
     def accepted_candidate(self) -> FlagCandidate | None:
-        accepted = [c for c in self.visible() if c.status == "accepted"]
+        accepted = [
+            c
+            for c in self.visible()
+            if c.status == "accepted" and candidate_is_finalizable(c)
+        ]
         if not accepted:
             return None
         return sorted(accepted, key=lambda c: (c.confidence, c.seen_count), reverse=True)[0]
@@ -203,7 +214,7 @@ def score_candidate(
     context: str,
     flag_regex: str | None,
 ) -> tuple[int, str, list[str]]:
-    score = 40
+    score = 35
     reasons: list[str] = ["matches configured/default flag pattern"]
     lower_context = context.lower()
     lower_command = (command or "").lower()
@@ -212,20 +223,26 @@ def score_candidate(
         score += 15
         reasons.append(f"observed in {source}")
     if source == "submit_flag":
-        score += 45
-        reasons.append("explicitly submitted by model")
+        score += 5
+        reasons.append("explicitly submitted by model; requires independent evidence")
     if flag_regex and re.search(flag_regex, value):
-        score += 15
+        score += 10
         reasons.append("matches configured flag pattern")
 
     stripped_context = context.strip()
-    if stripped_context == value or stripped_context.endswith(value):
-        score += 20
+    if stripped_context == value:
+        score += 40
+        reasons.append("candidate is the sole command output")
+    elif stripped_context.endswith(value):
+        score += 10
         reasons.append("candidate is the main command output")
 
-    if re.search(r"\b(flag|plaintext|decoded|decrypted|result|success|correct)\b\s*[:=]", lower_context):
-        score += 25
-        reasons.append("near strong success label")
+    if strong_validation_context(lower_context):
+        score += 30
+        reasons.append("near strong verification label")
+    elif re.search(r"\b(flag|plaintext|decoded|decrypted|result)\b\s*[:=]", lower_context):
+        score += 10
+        reasons.append("near derived-output label")
     elif any(word in lower_context for word in ("found", "solved", "accepted")):
         score += 10
         reasons.append("near positive evidence word")
@@ -238,14 +255,73 @@ def score_candidate(
         reasons.append("produced by explicit flag search")
 
     if weak_evidence_context(lower_context, lower_command):
-        score -= 35
+        score -= 45
         reasons.append("appears in metadata/source/example context")
 
     score = max(0, min(100, score))
-    status = "accepted" if score >= AUTO_ACCEPT_CONFIDENCE else "pending"
+    status = (
+        "accepted"
+        if score >= AUTO_ACCEPT_CONFIDENCE
+        and source != "submit_flag"
+        and candidate_context_is_auto_acceptable(
+            source=source,
+            command=lower_command,
+            context=lower_context,
+        )
+        else "pending"
+    )
     if status == "accepted":
-        reasons.append("auto-accepted by confidence threshold")
+        reasons.append("auto-accepted by confidence threshold and evidence policy")
     return score, status, reasons
+
+
+def strong_validation_context(lower_context: str) -> bool:
+    return bool(
+        re.search(
+            r"\b("
+            r"verified|verification passed|round[- ]?trip|re[- ]?encrypt|"
+            r"matches ciphertext|oracle accepted|correct flag|successfully decrypted|"
+            r"valid plaintext|check passed"
+            r")\b",
+            lower_context,
+        )
+    )
+
+
+def candidate_context_is_auto_acceptable(
+    *,
+    source: str,
+    command: str,
+    context: str,
+) -> bool:
+    if source == "submit_flag":
+        return False
+    if weak_evidence_context(context, command):
+        return False
+    if context.strip() and re.fullmatch(DEFAULT_FLAG_LIKE_CONTEXT_RE, context.strip()):
+        return True
+    if strong_validation_context(context):
+        return True
+    return False
+
+
+DEFAULT_FLAG_LIKE_CONTEXT_RE = re.compile(r"[A-Za-z0-9_]{2,32}\{[^}\r\n]{1,512}\}")
+
+
+def candidate_is_auto_acceptable(candidate: FlagCandidate) -> bool:
+    return candidate_is_finalizable(candidate) and candidate.confidence >= AUTO_ACCEPT_CONFIDENCE
+
+
+def candidate_is_finalizable(candidate: FlagCandidate) -> bool:
+    if not any(source != "submit_flag" for source in candidate.sources):
+        return False
+    lower_context = candidate.context.lower()
+    lower_command = (candidate.command or "").lower()
+    return candidate_context_is_auto_acceptable(
+        source=candidate.source,
+        command=lower_command,
+        context=lower_context,
+    ) or any("sole command output" in reason for reason in candidate.reasons)
 
 
 def weak_evidence_context(lower_context: str, lower_command: str) -> bool:

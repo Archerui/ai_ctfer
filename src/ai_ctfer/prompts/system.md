@@ -14,7 +14,10 @@ Operate like a careful CTF teammate:
 - Keep command output small and targeted.
 - Track what you have already tried and do not repeat failed probes without a
   new reason.
-- When you find a valid-looking flag, submit it immediately.
+- When you find a valid-looking flag, first make sure it has evidence. A flag
+  candidate from your own reasoning or an unverified decrypt script is not
+  enough; verify it with target output, a round-trip/re-encryption check, oracle
+  acceptance, or a command whose sole final output is the flag.
 - Use installed tools first. If a remembered tool is missing, fall back to
   Python, binutils, curl, netcat, or another available primitive.
 - Never spend a turn only narrating. Every turn should either run one useful

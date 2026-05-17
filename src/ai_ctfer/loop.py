@@ -22,18 +22,22 @@ from .candidates import (
     candidate_is_finalizable,
 )
 from .config import Language
+from .environment import detect_environment_issue
 from .executor import DockerExecutor
 from .files import copy_challenge_files, render_file_tree
 from .flag import matches_flag
 from .i18n import plan_markdown, t
 from .llm import LLMClient
 from .logger import RunLogger
+from .notebook import Notebook
 from .prompt import (
     PromptBuilder,
     build_candidate_adjudication_messages,
+    build_candidate_validation_messages,
     build_repair_messages,
 )
 from .schema import Challenge
+from .validation import CandidateValidationResult, parse_candidate_validation
 
 DEFAULT_PLANNING_STEPS = 50
 MAX_EXACT_COMMAND_REPEATS = 2
@@ -90,19 +94,23 @@ class AgentLoop:
         self.executor = executor
         self.logger = logger or RunLogger.create(self.challenge_dir)
         self.prompt_builder = PromptBuilder()
-        self.candidates = FlagCandidateStore(self.challenge.flag_regex)
+        self.candidates = FlagCandidateStore(self.challenge.flag_regex, category=self.challenge.category)
         self.planning_steps = planning_steps
         self.on_plan = on_plan
         self.on_event = on_event
         self.language = language
         self.command_counts: dict[str, int] = {}
         self.repeated_command_skips = 0
+        self.validated_candidate_revisions: set[tuple[str, int]] = set()
+        self.notebook = Notebook.load(self.challenge_dir, self.challenge, self.language)
+        self.environment_issue_reason: str | None = None
 
     def _emit(self, event: str, **payload: Any) -> None:
         if self.on_event:
             self.on_event(event, payload)
 
     def run(self) -> SolveResult:
+        self.notebook.start_run(self.logger.run_dir.name)
         copy_challenge_files(self.challenge_dir, self.logger.work_dir)
         self._emit("run_started", run_dir=self.logger.run_dir, work_dir=self.logger.work_dir)
         self.logger.log(
@@ -122,9 +130,12 @@ class AgentLoop:
             history=history,
             last_observation=last_observation,
         )
+        if self.environment_issue_reason:
+            return self._environment_issue(self.environment_issue_reason)
         if planning_result:
             self.logger.write_plan(planning_result.to_markdown(self.language))
             self.logger.log("plan_set", plan=planning_result)
+            self.notebook.record_plan(planning_result)
             if self.on_plan:
                 self.on_plan(planning_result)
             history.append(
@@ -158,6 +169,7 @@ class AgentLoop:
                 last_observation=last_observation,
                 remaining_steps=remaining_steps,
                 flag_candidates=self.candidates.prompt_items(),
+                notebook=self.notebook.prompt_text(),
                 language=self.language,
             )
             response = self.llm.complete(
@@ -180,6 +192,7 @@ class AgentLoop:
                     )
                     self.logger.log("parse_failed", step=step, reason=reason)
                     self.logger.write_summary("error", reason, language=self.language)
+                    self.notebook.record_finish("error", reason)
                     return SolveResult("error", self.logger.run_dir, reason=reason)
                 action = repaired
             else:
@@ -192,6 +205,7 @@ class AgentLoop:
                     )
                     self.logger.log("language_validation_failed", step=step, reason=reason)
                     self.logger.write_summary("error", reason, language=self.language)
+                    self.notebook.record_finish("error", reason)
                     return SolveResult("error", self.logger.run_dir, reason=reason)
 
             if isinstance(action, RunCommandAction):
@@ -233,6 +247,7 @@ class AgentLoop:
                 )
                 observation = result.observation()
                 last_observation = observation
+                environment_issue = self._detect_environment_issue(result)
                 candidates = self._collect_command_candidates(
                     step=step,
                     command=action.command,
@@ -248,6 +263,7 @@ class AgentLoop:
                         "timed_out": result.timed_out,
                         "rationale": action.rationale,
                         "candidate_count": len(candidates),
+                        "observation_excerpt": _observation_excerpt(observation),
                     }
                 )
                 self.logger.log(
@@ -268,6 +284,17 @@ class AgentLoop:
                     duration_sec=result.duration_sec,
                     candidate_count=len(candidates),
                 )
+                self.notebook.record_command(
+                    phase="solve",
+                    step=step,
+                    command=action.command,
+                    rationale=action.rationale,
+                    result=result,
+                    candidate_values=[candidate.value for candidate in candidates],
+                    environment_issue=environment_issue,
+                )
+                if environment_issue:
+                    return self._environment_issue(environment_issue)
                 if candidates:
                     last_observation += "\n\n" + t(self.language, "flag_candidates") + "\n" + self._candidate_summary()
                 if accepted := self.candidates.accepted_candidate():
@@ -277,6 +304,19 @@ class AgentLoop:
                             self.language,
                             en=f"Accepted high-confidence flag candidate after command at step {step}.",
                             zh=f"第 {step} 步命令后已接受高置信度 flag 候选。",
+                        ),
+                    )
+                if validated := self._try_validate_candidates(
+                    candidates=candidates,
+                    history=history,
+                    last_observation=last_observation,
+                ):
+                    return self._candidate_success(
+                        validated,
+                        _message(
+                            self.language,
+                            en=f"Validator accepted flag candidate after command at step {step}.",
+                            zh=f"第 {step} 步命令后，候选校验 agent 已接受该 flag。",
                         ),
                     )
                 continue
@@ -290,13 +330,37 @@ class AgentLoop:
                     step=step,
                     context=action.rationale,
                 )
-                if candidate:
+                self.notebook.record_submit(step=step, flag=action.flag, rationale=action.rationale)
+                if candidate and candidate.changed_in_last_update:
                     self.logger.log_candidate(candidate)
                     self.logger.log(
                         "flag_candidate",
                         step=step,
                         candidate=candidate,
                     )
+                if candidate:
+                    validation_history = history + [
+                        {
+                            "step": step,
+                            "action": "submit_flag",
+                            "candidate": candidate.prompt_dict(),
+                            "rationale": action.rationale,
+                        }
+                    ]
+                    if validated := self._try_validate_candidates(
+                        candidates=[candidate],
+                        history=validation_history,
+                        last_observation=last_observation,
+                        allow_submit_only=True,
+                    ):
+                        return self._candidate_success(
+                            validated,
+                            _message(
+                                self.language,
+                                en=f"Validator accepted model-submitted flag candidate at step {step}.",
+                                zh=f"第 {step} 步，候选校验 agent 已接受模型提交的 flag。",
+                            ),
+                        )
                 if candidate and candidate.status == "accepted" and candidate_is_finalizable(candidate):
                     return self._candidate_success(
                         candidate,
@@ -371,6 +435,7 @@ class AgentLoop:
                 reason = action.rationale or action.status
                 self.logger.log("finished", step=step, action=action.model_dump())
                 self.logger.write_summary(action.status, reason, language=self.language)
+                self.notebook.record_finish(action.status, reason)
                 return SolveResult(action.status, self.logger.run_dir, reason=reason)
 
         if resolution := self._try_resolve_candidates(
@@ -390,6 +455,7 @@ class AgentLoop:
         )
         self.logger.log("max_steps_reached", reason=reason)
         self.logger.write_summary("max_steps", reason, language=self.language)
+        self.notebook.record_finish("max_steps", reason)
         return SolveResult("max_steps", self.logger.run_dir, reason=reason)
 
     def _run_planning_phase(
@@ -416,6 +482,7 @@ class AgentLoop:
                 last_observation=last_observation,
                 remaining_planning_steps=self.planning_steps - planning_step + 1,
                 flag_candidates=self.candidates.prompt_items(),
+                notebook=self.notebook.prompt_text(),
                 language=self.language,
             )
             response = self.llm.complete(
@@ -502,6 +569,7 @@ class AgentLoop:
                     self.challenge.limits.max_output_chars,
                 )
                 last_observation = result.observation()
+                environment_issue = self._detect_environment_issue(result)
                 candidates = self._collect_command_candidates(
                     step=-planning_step,
                     command=action.command,
@@ -517,6 +585,7 @@ class AgentLoop:
                     "timed_out": result.timed_out,
                     "rationale": action.rationale,
                     "candidate_count": len(candidates),
+                    "observation_excerpt": _observation_excerpt(last_observation),
                 }
                 planning_history.append(record)
                 history.append(record)
@@ -538,9 +607,30 @@ class AgentLoop:
                     duration_sec=result.duration_sec,
                     candidate_count=len(candidates),
                 )
+                self.notebook.record_command(
+                    phase="planning",
+                    step=planning_step,
+                    command=action.command,
+                    rationale=action.rationale,
+                    result=result,
+                    candidate_values=[candidate.value for candidate in candidates],
+                    environment_issue=environment_issue,
+                )
+                if environment_issue:
+                    self.environment_issue_reason = environment_issue
+                    return None, last_observation
                 if candidates:
                     last_observation += "\n\n" + t(self.language, "flag_candidates") + "\n" + self._candidate_summary()
                 if self.candidates.accepted_candidate():
+                    return (
+                        self._planning_found_candidate_plan(),
+                        last_observation,
+                    )
+                if self._try_validate_candidates(
+                    candidates=candidates,
+                    history=history,
+                    last_observation=last_observation,
+                ):
                     return (
                         self._planning_found_candidate_plan(),
                         last_observation,
@@ -559,13 +649,15 @@ class AgentLoop:
                     step=-planning_step,
                     context=action.rationale,
                 )
+                self.notebook.record_submit(step=-planning_step, flag=action.flag, rationale=action.rationale)
                 if candidate:
-                    self.logger.log_candidate(candidate)
-                    self.logger.log(
-                        "flag_candidate",
-                        planning_step=planning_step,
-                        candidate=candidate,
-                    )
+                    if candidate.changed_in_last_update:
+                        self.logger.log_candidate(candidate)
+                        self.logger.log(
+                            "flag_candidate",
+                            planning_step=planning_step,
+                            candidate=candidate,
+                        )
                     if candidate.status == "accepted" and candidate_is_finalizable(candidate):
                         return (
                             self._planning_submitted_candidate_plan(action.rationale),
@@ -869,6 +961,109 @@ class AgentLoop:
             )
         return "\n".join(lines)
 
+    def _try_validate_candidates(
+        self,
+        *,
+        candidates: list[FlagCandidate],
+        history: list[dict[str, Any]],
+        last_observation: str,
+        allow_submit_only: bool = False,
+    ) -> FlagCandidate | None:
+        ordered = sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate.confidence,
+                candidate.seen_count,
+                candidate.first_seen_step,
+            ),
+            reverse=True,
+        )
+        for candidate in ordered:
+            revision_key = (candidate.normalized_value, candidate.revision)
+            if revision_key in self.validated_candidate_revisions:
+                continue
+            if not allow_submit_only and not any(source != "submit_flag" for source in candidate.sources):
+                continue
+            self.validated_candidate_revisions.add(revision_key)
+            validation = self._validate_candidate(
+                candidate=candidate,
+                history=history,
+                last_observation=last_observation,
+            )
+            if validation is None:
+                continue
+            if validation.verdict == "trusted" and validation.confidence >= 75:
+                accepted = self.candidates.mark_accepted(
+                    candidate.value,
+                    _message(
+                        self.language,
+                        en=f"accepted by candidate validator: {validation.rationale}",
+                        zh=f"由候选校验 agent 接受：{validation.rationale}",
+                    ),
+                )
+                if accepted:
+                    self.logger.log_candidate(accepted, event="candidate_validated")
+                    return accepted
+            if validation.verdict == "decoy" and validation.confidence >= 85:
+                rejected = self.candidates.mark_rejected(
+                    candidate.value,
+                    _message(
+                        self.language,
+                        en=f"rejected by candidate validator: {validation.rationale}",
+                        zh=f"由候选校验 agent 拒绝：{validation.rationale}",
+                    ),
+                )
+                if rejected:
+                    self.logger.log_candidate(rejected, event="candidate_rejected")
+        return None
+
+    def _validate_candidate(
+        self,
+        *,
+        candidate: FlagCandidate,
+        history: list[dict[str, Any]],
+        last_observation: str,
+    ) -> CandidateValidationResult | None:
+        response = self.llm.complete(
+            build_candidate_validation_messages(
+                challenge=self.challenge,
+                candidate=candidate.prompt_dict(),
+                candidates=self.candidates.prompt_items(),
+                history=history,
+                last_observation=last_observation,
+                language=self.language,
+            ),
+            model=self.challenge.model.api_model,
+            reasoning_effort=self.challenge.model.reasoning_effort,
+            temperature=0.0,
+        )
+        self.logger.log(
+            "candidate_validation_response",
+            candidate=candidate.prompt_dict(),
+            response=response,
+        )
+        try:
+            validation = parse_candidate_validation(response)
+        except (ValueError, ValidationError) as exc:
+            self.logger.log(
+                "candidate_validation_failed",
+                candidate=candidate.prompt_dict(),
+                error=str(exc),
+            )
+            return None
+        self.logger.log(
+            "candidate_validation_result",
+            candidate=candidate.prompt_dict(),
+            validation=validation.model_dump(),
+        )
+        self.notebook.record_candidate_validation(
+            flag=candidate.value,
+            verdict=validation.verdict,
+            confidence=validation.confidence,
+            rationale=validation.rationale,
+        )
+        return validation
+
     def _try_resolve_candidates(
         self,
         *,
@@ -979,6 +1174,32 @@ class AgentLoop:
         self.logger.log_candidate(candidate, event="candidate_accepted")
         return self._success(candidate.value, details)
 
+    def _detect_environment_issue(self, result: Any) -> str | None:
+        issue = detect_environment_issue(result, self.challenge)
+        if issue is None:
+            return None
+        target_text = f" ({issue.target})" if issue.target else ""
+        return _message(
+            self.language,
+            en=(
+                f"Possible challenge environment problem{target_text}: {issue.reason}. "
+                "Check or restart the remote environment, update challenge.yml with the "
+                "new address if it changed, then run solve again. Notebook targets from "
+                "older runs are not authoritative."
+            ),
+            zh=(
+                f"题目环境可能异常{target_text}：{issue.reason}。请检查或重启远程环境；"
+                "如果地址变化，请先更新 challenge.yml 后再重新运行 solve。旧笔记里的"
+                "历史地址不会作为当前目标。"
+            ),
+        )
+
+    def _environment_issue(self, reason: str) -> SolveResult:
+        self.logger.log("environment_issue", reason=reason)
+        self.logger.write_summary("environment_error", reason, language=self.language)
+        self.notebook.record_finish("environment_error", reason)
+        return SolveResult("environment_error", self.logger.run_dir, reason=reason)
+
     def _success(self, flag: str, details: str) -> SolveResult:
         self.logger.write_final_flag(flag)
         candidate_text = ""
@@ -996,6 +1217,7 @@ class AgentLoop:
             language=self.language,
         )
         self.logger.log("success", flag=flag, details=details)
+        self.notebook.record_finish("success", f"{details}\nFlag: {flag}")
         return SolveResult("success", self.logger.run_dir, flag=flag, reason=details)
 
 
@@ -1024,6 +1246,15 @@ def _natural_language_fields(
 
 def _message(language: Language, *, en: str, zh: str) -> str:
     return zh if language == "zh" else en
+
+
+def _observation_excerpt(observation: str, max_chars: int = 1600) -> str:
+    observation = observation.strip()
+    if len(observation) <= max_chars:
+        return observation
+    head = observation[: max_chars // 2].rstrip()
+    tail = observation[-max_chars // 2 :].lstrip()
+    return f"{head}\n...[truncated]...\n{tail}"
 
 
 def _command_fingerprint(command: str) -> str:

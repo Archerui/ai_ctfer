@@ -15,6 +15,8 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 
+from .artifacts import write_success_artifacts
+from .clean import clean_ai_ctfer
 from .config import AppConfig, config_path, load_config, normalize_language, save_config
 from .executor import DockerExecutor
 from .i18n import display_language, phase_name, t
@@ -214,12 +216,64 @@ def solve(
 
     if result.flag:
         console.print(f"[green]{t(language, 'solved')}[/green] {result.flag}")
+        try:
+            artifacts = write_success_artifacts(
+                challenge_dir=workdir,
+                run_dir=result.run_dir,
+                challenge=challenge,
+                flag=result.flag,
+                language=language,
+            )
+        except Exception as exc:
+            console.print(
+                f"[yellow]{_message(language, en='Solved, but artifact generation failed:', zh='已解出，但整理 writeup/脚本失败：')}[/yellow] {exc}"
+            )
+        else:
+            console.print(f"[green]{t(language, 'wrote')}[/green] {artifacts.writeup_path}")
+            console.print(f"[green]{t(language, 'wrote')}[/green] {artifacts.solve_path}")
     else:
         console.print(f"[yellow]{t(language, 'finished_status')}[/yellow] {result.status}")
         if result.reason:
             console.print(result.reason)
 
     if result.status not in {"success", "done"}:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def clean(
+    workdir: Annotated[Path, typer.Argument(help="Challenge directory.")] = Path("."),
+    runs: Annotated[
+        bool,
+        typer.Option("--runs", help="Remove WORKDIR/.ai-ctfer run artifacts."),
+    ] = False,
+    image: Annotated[
+        bool,
+        typer.Option("--image", help="Remove the ai-ctfer Docker image."),
+    ] = False,
+    docker_cache: Annotated[
+        bool,
+        typer.Option("--docker-cache", help="Prune Docker build cache."),
+    ] = False,
+    all_targets: Annotated[
+        bool,
+        typer.Option("--all", help="Clean runs, Docker image, and Docker build cache."),
+    ] = False,
+) -> None:
+    """Clean ai-ctfer run artifacts and optional Docker resources."""
+    language = load_config().language
+    result = clean_ai_ctfer(
+        workdir=workdir,
+        runs=runs,
+        image=image,
+        docker_cache=docker_cache,
+        all_targets=all_targets,
+    )
+    for message in result.messages:
+        console.print(f"[green]{_message(language, en='clean:', zh='清理：')}[/green] {message}")
+    for error in result.errors:
+        console.print(f"[red]{_message(language, en='clean error:', zh='清理错误：')}[/red] {error}")
+    if result.errors:
         raise typer.Exit(code=1)
 
 
@@ -395,3 +449,7 @@ def _looks_command_like(text: str) -> bool:
             lowered,
         )
     )
+
+
+def _message(language, *, en: str, zh: str) -> str:
+    return zh if language == "zh" else en

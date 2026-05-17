@@ -18,6 +18,7 @@ class FlagCandidate:
     step: int
     confidence: int
     status: str
+    category: str = "unknown"
     sources: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     command: str | None = None
@@ -25,6 +26,8 @@ class FlagCandidate:
     first_seen_step: int = 0
     last_seen_step: int = 0
     seen_count: int = 1
+    revision: int = 1
+    changed_in_last_update: bool = True
 
     def __post_init__(self) -> None:
         if not self.sources:
@@ -41,9 +44,11 @@ class FlagCandidate:
             "sources": self.sources,
             "confidence": self.confidence,
             "status": self.status,
+            "category": self.category,
             "seen_count": self.seen_count,
             "first_seen_step": self.first_seen_step,
             "last_seen_step": self.last_seen_step,
+            "revision": self.revision,
             "command": self.command,
             "context": self.context,
             "reasons": self.reasons[-5:],
@@ -51,8 +56,9 @@ class FlagCandidate:
 
 
 class FlagCandidateStore:
-    def __init__(self, flag_regex: str | None = None) -> None:
+    def __init__(self, flag_regex: str | None = None, category: object = "unknown") -> None:
         self.flag_regex = flag_regex
+        self.category = normalize_category(category)
         self._by_normalized: dict[str, FlagCandidate] = {}
         self._all: list[FlagCandidate] = []
 
@@ -84,7 +90,7 @@ class FlagCandidateStore:
                 command=command,
                 context=context,
             )
-            if candidate is not None:
+            if candidate is not None and candidate.changed_in_last_update:
                 added.append(candidate)
         return added
 
@@ -109,21 +115,42 @@ class FlagCandidateStore:
             command=command,
             context=context,
             flag_regex=self.flag_regex,
+            category=self.category,
         )
         existing = self._by_normalized.get(normalized)
         if existing:
             existing.seen_count += 1
             existing.last_seen_step = step
+            existing.changed_in_last_update = False
             if source not in existing.sources:
                 existing.sources.append(source)
-            if confidence > existing.confidence:
+                existing.changed_in_last_update = source != "submit_flag" or not any(
+                    existing_source != "submit_flag" for existing_source in existing.sources
+                )
+            if better_evidence(
+                existing,
+                source=source,
+                confidence=confidence,
+                context=context,
+            ):
                 existing.confidence = confidence
                 existing.source = source
                 existing.command = command
                 existing.context = context
-            existing.reasons = merge_reasons(existing.reasons, reasons)
+                existing.changed_in_last_update = True
+            merged_reasons = merge_reasons(existing.reasons, reasons)
+            if merged_reasons != existing.reasons:
+                existing.reasons = merged_reasons
+                if source != "submit_flag" or not any(
+                    existing_source != "submit_flag" for existing_source in existing.sources
+                ):
+                    existing.changed_in_last_update = True
             if status == "accepted" and candidate_is_auto_acceptable(existing):
-                existing.status = "accepted"
+                if existing.status != "accepted":
+                    existing.status = "accepted"
+                    existing.changed_in_last_update = True
+            if existing.changed_in_last_update:
+                existing.revision += 1
             return existing
 
         candidate = FlagCandidate(
@@ -136,6 +163,7 @@ class FlagCandidateStore:
             context=context,
             confidence=confidence,
             status=status,
+            category=self.category,
             reasons=reasons,
         )
         self._by_normalized[normalized] = candidate
@@ -169,28 +197,46 @@ class FlagCandidateStore:
         candidate = self._by_normalized.get(normalize_flag_candidate(value))
         if candidate is None:
             return None
+        changed = candidate.status != "accepted" or candidate.confidence < AUTO_ACCEPT_CONFIDENCE
         candidate.status = "accepted"
         candidate.reasons = merge_reasons(candidate.reasons, [reason])
         candidate.confidence = max(candidate.confidence, AUTO_ACCEPT_CONFIDENCE)
+        candidate.changed_in_last_update = changed
+        if changed:
+            candidate.revision += 1
         return candidate
 
     def mark_rejected(self, value: str, reason: str) -> FlagCandidate | None:
         candidate = self._by_normalized.get(normalize_flag_candidate(value))
         if candidate is None:
             return None
+        changed = candidate.status != "rejected"
         candidate.status = "rejected"
         candidate.reasons = merge_reasons(candidate.reasons, [reason])
+        candidate.changed_in_last_update = changed
+        if changed:
+            candidate.revision += 1
         return candidate
+
+
+def normalize_category(category: object) -> str:
+    value = getattr(category, "value", category)
+    if value is None:
+        return "unknown"
+    return str(value).lower()
 
 
 def normalize_flag_candidate(value: str) -> str:
     return value.strip().strip("`'\"")
 
 
-def context_for_value(text: str, value: str, max_chars: int = 240) -> str:
-    for line in text.splitlines():
+def context_for_value(text: str, value: str, max_chars: int = 480, neighbor_lines: int = 2) -> str:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         if value in line:
-            return compact_context(line, max_chars)
+            start = max(0, index - neighbor_lines)
+            end = min(len(lines), index + neighbor_lines + 1)
+            return compact_context("\n".join(lines[start:end]), max_chars)
     index = text.find(value)
     if index < 0:
         return ""
@@ -213,6 +259,7 @@ def score_candidate(
     command: str | None,
     context: str,
     flag_regex: str | None,
+    category: str = "unknown",
 ) -> tuple[int, str, list[str]]:
     score = 35
     reasons: list[str] = ["matches configured/default flag pattern"]
@@ -247,14 +294,22 @@ def score_candidate(
         score += 10
         reasons.append("near positive evidence word")
 
-    if any(tool in lower_command for tool in ("rsa_factordb", "solve.py", "exploit.py")):
+    if any(tool in lower_command for tool in ("rsa_factordb", "solve.py", "exploit.py", "verify.py")):
         score += 10
         reasons.append("produced by solve/helper script")
     if any(tool in lower_command for tool in ("grep", "strings", "ripgrep", "rg ")):
         score += 10
         reasons.append("produced by explicit flag search")
 
-    if weak_evidence_context(lower_context, lower_command):
+    if active_solution_context(
+        category=category,
+        lower_context=lower_context,
+        lower_command=lower_command,
+    ):
+        score += 20
+        reasons.append("produced by active solve/exploit workflow")
+
+    if weak_evidence_context(lower_context, lower_command, category=category):
         score -= 45
         reasons.append("appears in metadata/source/example context")
 
@@ -267,6 +322,7 @@ def score_candidate(
             source=source,
             command=lower_command,
             context=lower_context,
+            category=category,
         )
         else "pending"
     )
@@ -293,14 +349,23 @@ def candidate_context_is_auto_acceptable(
     source: str,
     command: str,
     context: str,
+    category: str = "unknown",
 ) -> bool:
     if source == "submit_flag":
         return False
-    if weak_evidence_context(context, command):
+    if web_passive_evidence(category, context, command):
+        return False
+    if weak_evidence_context(context, command, category=category) and not strong_validation_context(context):
         return False
     if context.strip() and re.fullmatch(DEFAULT_FLAG_LIKE_CONTEXT_RE, context.strip()):
         return True
     if strong_validation_context(context):
+        return True
+    if active_solution_context(
+        category=category,
+        lower_context=context,
+        lower_command=command,
+    ):
         return True
     return False
 
@@ -321,10 +386,102 @@ def candidate_is_finalizable(candidate: FlagCandidate) -> bool:
         source=candidate.source,
         command=lower_command,
         context=lower_context,
+        category=candidate.category,
     ) or any("sole command output" in reason for reason in candidate.reasons)
 
 
-def weak_evidence_context(lower_context: str, lower_command: str) -> bool:
+def better_evidence(
+    existing: FlagCandidate,
+    *,
+    source: str,
+    confidence: int,
+    context: str,
+) -> bool:
+    existing_has_independent = any(existing_source != "submit_flag" for existing_source in existing.sources)
+    if source == "submit_flag" and existing_has_independent:
+        return False
+    if existing.source == "submit_flag" and source != "submit_flag":
+        return True
+    if confidence > existing.confidence:
+        return True
+    if confidence == existing.confidence and context_quality(context) > context_quality(existing.context):
+        return True
+    return False
+
+
+def context_quality(context: str) -> int:
+    lower_context = context.lower()
+    score = 0
+    if strong_validation_context(lower_context):
+        score += 3
+    if re.search(r"\b(flag|plaintext|decoded|decrypted|result)\b\s*[:=]", lower_context):
+        score += 1
+    if context.strip() and re.fullmatch(DEFAULT_FLAG_LIKE_CONTEXT_RE, context.strip()):
+        score += 2
+    return score
+
+
+def active_solution_context(
+    *,
+    category: str,
+    lower_context: str,
+    lower_command: str,
+) -> bool:
+    if category not in {"crypto", "pwn", "rev", "forensics", "misc"}:
+        return False
+    if category == "web" and web_passive_evidence(category, lower_context, lower_command):
+        return False
+    active_command_markers = (
+        "solve.py",
+        "exploit.py",
+        "verify.py",
+        "check.py",
+        "rsa_factordb",
+        "sage",
+        "angr",
+        "z3",
+        "pwntools",
+        "cat /flag",
+        "cat flag",
+    )
+    if not any(marker in lower_command for marker in active_command_markers):
+        return False
+    return bool(
+        strong_validation_context(lower_context)
+        or re.search(r"\b(flag|plaintext|decoded|decrypted|result)\b\s*[:=]", lower_context)
+        or re.fullmatch(DEFAULT_FLAG_LIKE_CONTEXT_RE, lower_context.strip())
+    )
+
+
+def web_passive_evidence(category: str, lower_context: str, lower_command: str) -> bool:
+    if category != "web":
+        return False
+    passive_command_markers = (
+        "curl ",
+        "wget ",
+        "http ",
+        "httpie",
+        "view-source",
+        "page_source",
+    )
+    passive_context_markers = (
+        "<html",
+        "<script",
+        "<!--",
+        "document.",
+        "window.",
+        "ignore previous",
+        "ignore all previous",
+        "system prompt",
+        "developer message",
+        "prompt injection",
+    )
+    return any(marker in lower_command for marker in passive_command_markers) or any(
+        marker in lower_context for marker in passive_context_markers
+    )
+
+
+def weak_evidence_context(lower_context: str, lower_command: str, category: str = "unknown") -> bool:
     weak_context_markers = (
         "flag_format",
         "format is",
@@ -336,8 +493,12 @@ def weak_evidence_context(lower_context: str, lower_command: str) -> bool:
         "sample",
     )
     weak_commands = ("cat ", "sed ", "head ", "tail ", "less ", "challenge.yml")
-    return any(marker in lower_context for marker in weak_context_markers) or any(
-        marker in lower_command for marker in weak_commands
+    context_is_weak = any(marker in lower_context for marker in weak_context_markers)
+    command_is_weak = any(marker in lower_command for marker in weak_commands)
+    return (
+        context_is_weak
+        or web_passive_evidence(category, lower_context, lower_command)
+        or (command_is_weak and not strong_validation_context(lower_context))
     )
 
 

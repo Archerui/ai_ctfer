@@ -26,10 +26,13 @@ Minimal `challenge.yml`:
 name: example-challenge
 # category options: pwn, rev, crypto, web, forensics, misc, unknown
 category: crypto
-description: |
+# Paste statement, flag format, remote endpoints, hints, and notes here.
+# Standard YAML wants indented block lines. ai-ctfer also repairs accidental
+# unindented pasted lines inside this description block.
+description: |-
   Paste the challenge text here.
-flag_format: "flag{...}"
-remote: "nc example.com 31337"
+  nc example.com 31337
+  Flag format: flag{...}
 
 limits:
   max_steps: 50
@@ -44,14 +47,35 @@ model:
   temperature: 0.1
 ```
 
-`remote` is intentionally one line. Put the raw connection text there, such as
-`nc example.com 31337`, `example.com:31337`, or an HTTP URL; the agent will parse
-host, port, and protocol from context.
+Put raw connection text directly in `description`, such as `nc example.com
+31337`, `example.com:31337`, or an HTTP URL; the agent will parse host, port,
+and protocol from context.
 
 Each `solve` run starts with an automatic planning phase. The agent may run a few
 exploratory commands, prints the selected plan, then starts execution without
 waiting for confirmation. The plan is also saved as `plan.md` in the run
 directory.
+
+During solving, `ai-ctfer` maintains `ai-ctfer-notes.md` in the challenge
+directory. Future runs read this notebook first, reuse useful findings, and keep
+adding concise attempt/result notes. If the current `challenge.yml` contains a
+new target address, old notebook target values are updated so stale remote
+environment URLs do not steer the next run.
+
+When a challenge is solved, the CLI prints the flag first, then writes
+`writeup.md` and a solve/replay script such as `solve.py` or `solve.sage` into
+the challenge directory. Their language follows `ai-ctfer language`.
+
+Cleanup examples:
+
+```bash
+ai-ctfer clean . --runs          # remove .ai-ctfer and ai-ctfer-notes.md
+ai-ctfer clean . --image         # remove ai-ctfer-sandbox:latest
+ai-ctfer clean . --docker-cache  # prune Docker build cache
+ai-ctfer clean . --all
+```
+
+Cleanup does not remove `writeup.md` or generated solve scripts.
 
 ## Docker
 
@@ -84,3 +108,77 @@ To verify the configured real LLM path:
 ```bash
 ai-ctfer smoke --real-llm
 ```
+
+## Q&A
+
+### Why does Docker say permission denied?
+
+`ai-ctfer` uses the current user to run Docker. It does not use `sudo` or do
+any privilege escalation internally. If this fails:
+
+```bash
+docker run --rm hello-world
+```
+
+then Docker-backed commands will fail too, including:
+
+- `ai-ctfer solve .`
+- `ai-ctfer smoke --fake-llm`
+- `ai-ctfer clean . --image`
+- `ai-ctfer clean . --docker-cache`
+- `ai-ctfer clean . --all`
+
+Local cleanup still works without Docker permission:
+
+```bash
+ai-ctfer clean . --runs
+```
+
+The usual fix is to add your user to the `docker` group:
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker
+docker run --rm hello-world
+```
+
+If `newgrp docker` does not refresh the session cleanly, log out and log back
+in, then rerun:
+
+```bash
+ai-ctfer doctor --strict
+```
+
+Running `sudo ai-ctfer solve .` can work, but it is not recommended because
+generated files may become owned by `root`.
+
+### Why does `clean --all` fail with `unable to delete ai-ctfer-sandbox:latest`?
+
+This means Docker still has a container that references the sandbox image. The
+container may be stopped, but Docker still keeps the image locked until that
+container is removed.
+
+Check which containers are using the image:
+
+```bash
+docker ps -a --filter ancestor=ai-ctfer-sandbox:latest
+```
+
+If the listed containers are old `ai-ctfer` sandbox containers and you do not
+need them anymore, remove them and rerun image cleanup:
+
+```bash
+docker rm -f <container-id>
+ai-ctfer clean . --image
+```
+
+For a one-shot cleanup of all containers based on this image:
+
+```bash
+docker ps -aq --filter ancestor=ai-ctfer-sandbox:latest | xargs -r docker rm -f
+ai-ctfer clean . --image
+```
+
+`ai-ctfer clean . --runs` is already done before this point, so this error does
+not mean your run logs or `ai-ctfer-notes.md` are still present. It only means
+Docker refused to remove the reusable sandbox image.

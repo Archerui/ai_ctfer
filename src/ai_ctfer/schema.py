@@ -141,7 +141,7 @@ def load_challenge(workdir: Path, schema_path: Path | None = None) -> Challenge:
     if not schema_file.exists():
         return Challenge(name=workdir.resolve().name)
 
-    raw = yaml.safe_load(schema_file.read_text(encoding="utf-8")) or {}
+    raw = load_challenge_yaml(schema_file.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{schema_file} must contain a YAML mapping")
 
@@ -151,16 +151,85 @@ def load_challenge(workdir: Path, schema_path: Path | None = None) -> Challenge:
     return challenge
 
 
+DESCRIPTION_BLOCK_RE = re.compile(r"^description:\s*[|>][-+]?(?:\s+#.*)?\s*$")
+TOP_LEVEL_SCHEMA_KEYS = {
+    "name",
+    "category",
+    "description",
+    "flag_format",
+    "flag_regex",
+    "remote",
+    "hints",
+    "limits",
+    "model",
+}
+
+
+def load_challenge_yaml(text: str) -> Any:
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as original_error:
+        repaired = repair_unindented_description_block(text)
+        if repaired == text:
+            raise original_error
+        try:
+            return yaml.safe_load(repaired)
+        except yaml.YAMLError:
+            raise original_error
+
+
+def repair_unindented_description_block(text: str) -> str:
+    lines = text.splitlines()
+    repaired: list[str] = []
+    in_description = False
+
+    for line in lines:
+        if not in_description:
+            repaired.append(line)
+            if DESCRIPTION_BLOCK_RE.match(line):
+                in_description = True
+            continue
+
+        if is_top_level_schema_key(line):
+            in_description = False
+            repaired.append(line)
+            continue
+
+        repaired.append(indent_description_content_line(line))
+
+    trailing_newline = "\n" if text.endswith("\n") else ""
+    return "\n".join(repaired) + trailing_newline
+
+
+def is_top_level_schema_key(line: str) -> bool:
+    if not line or line[0].isspace() or line.startswith("#"):
+        return False
+    key, separator, _rest = line.partition(":")
+    return bool(separator) and key in TOP_LEVEL_SCHEMA_KEYS
+
+
+def indent_description_content_line(line: str) -> str:
+    if not line:
+        return line
+    if line.startswith("\t"):
+        return "  " + line.lstrip("\t")
+    leading_spaces = len(line) - len(line.lstrip(" "))
+    if leading_spaces >= 2:
+        return line
+    return " " * (2 - leading_spaces) + line
+
+
 SAMPLE_CHALLENGE_YAML = """name: example-challenge
 # category options: pwn, rev, crypto, web, forensics, misc, unknown
 category: unknown
-description: |
-  Briefly describe the challenge here. Include any nc/http endpoint text from
-  the challenge page if useful.
-flag_format: "flag{...}"
-remote: ""  # optional, e.g. "nc example.com 31337" or "https://example.com/"
-
-hints: []
+# Paste everything from the challenge page here: statement, flag format,
+# nc/http endpoints, hints, and any notes. Standard YAML wants indented lines
+# below; ai-ctfer also repairs accidentally unindented pasted description lines.
+description: |-
+  Paste the full challenge statement here.
+  Example:
+  nc example.com 31337
+  Flag format: flag{...}
 
 limits:
   max_steps: 50

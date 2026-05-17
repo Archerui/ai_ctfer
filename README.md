@@ -1,8 +1,6 @@
 # AI-CTFer
 
-`AI-CTFer` is a small, single-challenge CTF agent. It reads an optional
-`challenge.yml`, calls either DeepSeek or OpenAI, and executes commands inside a
-Docker sandbox.
+`AI-CTFer` is a lightweight AI agent designed to solve individual CTF challenges. It reads an optional `challenge.yml` file, calls either DeepSeek or OpenAI API, and executes commands inside a Docker sandbox.
 
 ## Quick Start
 

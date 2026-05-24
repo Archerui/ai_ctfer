@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from .config import Language
@@ -179,6 +181,7 @@ def build_writeup(
     plan = read_text(run_dir / "plan.md")
     summary = read_text(run_dir / "summary.md")
     candidate_log = read_text(run_dir / "flag_candidates.jsonl")
+    run_duration = summarize_run_duration(trace_events, language)
     commands = summarize_commands(trace_events, language)
     candidate_summary = summarize_candidates(candidate_log)
     failed_attempts = summarize_failed_attempts(trace_events, candidate_log, language)
@@ -193,6 +196,7 @@ def build_writeup(
                 f"- Flag: `{flag}`",
                 f"- 类别：`{challenge.category.value}`",
                 f"- 解题脚本：`{solve_path.name}`",
+                f"- 耗时：{run_duration}",
                 "",
                 "## 题目信息",
                 "",
@@ -230,6 +234,7 @@ def build_writeup(
             f"- Flag: `{flag}`",
             f"- Category: `{challenge.category.value}`",
             f"- Solve script: `{solve_path.name}`",
+            f"- Elapsed: {run_duration}",
             "",
             "## Challenge Information",
             "",
@@ -257,6 +262,57 @@ def build_writeup(
             "",
         ]
     )
+
+
+def summarize_run_duration(events: list[dict[str, object]], language: Language) -> str:
+    timestamps = [
+        parsed
+        for event in events
+        if (parsed := parse_timestamp(event.get("ts"))) is not None
+    ]
+    if len(timestamps) < 2:
+        return "未知" if language == "zh" else "unknown"
+
+    start = timestamps[0]
+    end = None
+    for event in reversed(events):
+        if event.get("event") == "success":
+            end = parse_timestamp(event.get("ts"))
+            if end is not None:
+                break
+    if end is None:
+        end = timestamps[-1]
+
+    elapsed = max(0, int(round((end - start).total_seconds())))
+    return format_duration(elapsed, language)
+
+
+def parse_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def format_duration(total_seconds: int, language: Language) -> str:
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if language == "zh":
+        parts = []
+        if hours:
+            parts.append(f"{hours} 小时")
+        if minutes:
+            parts.append(f"{minutes} 分钟")
+        if seconds or not parts:
+            parts.append(f"{seconds} 秒")
+        return " ".join(parts)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
 
 
 def find_reproduction_command(run_dir: Path, flag: str) -> str | None:
@@ -380,7 +436,7 @@ def failed_event_reason(event: dict[str, object], result: dict[str, object], lan
     if isinstance(exit_code, int) and exit_code != 0:
         return f"命令退出码 {exit_code}" if zh else f"command exited with {exit_code}"
     output = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
-    if "404" in output or "not found" in output:
+    if re.search(r"\b(?:http/\S+\s+)?404\b", output) or "not found" in output:
         return "目标路径不存在或返回 404" if zh else "target path missing or returned 404"
     if "missing" in output or "warning" in output:
         return "输出提示缺少信息" if zh else "output indicated missing information"

@@ -3,10 +3,19 @@ from __future__ import annotations
 import re
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .model_interface import (
+    default_model_provider,
+    get_api_model,
+    get_default_temperature,
+    get_reasoning_effort,
+    model_sample_comment_lines,
+    normalize_model_name,
+)
 
 
 class Category(str, Enum):
@@ -65,25 +74,12 @@ class Limits(BaseModel):
 class LLMConfig(BaseModel):
     model_config = ConfigDict(extra="ignore", validate_assignment=True)
 
-    name: Literal["deepseek", "gpt"] = "deepseek"
-    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    name: str = Field(default_factory=default_model_provider)
 
     @field_validator("name", mode="before")
     @classmethod
     def normalize_model_name(cls, value: Any) -> str:
-        normalized = str(value or "deepseek").strip().lower()
-        aliases = {
-            "deepseek": "deepseek",
-            "deepseek-v4-pro": "deepseek",
-            "deepseek-v4-flash": "deepseek",
-            "gpt": "gpt",
-            "openai": "gpt",
-            "gpt-5.5": "gpt",
-            "gpt-5.5-xhigh": "gpt",
-        }
-        if normalized in aliases:
-            return aliases[normalized]
-        raise ValueError("model.name must be either 'deepseek' or 'gpt'")
+        return normalize_model_name(value)
 
     @property
     def provider(self) -> str:
@@ -91,15 +87,15 @@ class LLMConfig(BaseModel):
 
     @property
     def api_model(self) -> str:
-        if self.name == "gpt":
-            return "gpt-5.5"
-        return "deepseek-v4-pro"
+        return get_api_model(self.name)
 
     @property
     def reasoning_effort(self) -> str | None:
-        if self.name == "gpt":
-            return "xhigh"
-        return None
+        return get_reasoning_effort(self.name)
+
+    @property
+    def temperature(self) -> float | None:
+        return get_default_temperature(self.name)
 
 
 class Challenge(BaseModel):
@@ -219,7 +215,8 @@ def indent_description_content_line(line: str) -> str:
     return " " * (2 - leading_spaces) + line
 
 
-SAMPLE_CHALLENGE_YAML = """name: example-challenge
+def build_sample_challenge_yaml() -> str:
+    return f"""name: example-challenge
 # category options: pwn, rev, crypto, web, forensics, misc, unknown
 category: unknown
 # Paste everything from the challenge page here: statement, flag format,
@@ -229,7 +226,7 @@ description: |-
   Paste the full challenge statement here.
   Example:
   nc example.com 31337
-  Flag format: flag{...}
+  Flag format: flag{{...}}
 
 limits:
   max_steps: 50
@@ -237,9 +234,9 @@ limits:
   max_output_chars: 50000
 
 model:
-  # name options: deepseek, gpt
-  # deepseek => deepseek-v4-pro
-  # gpt => gpt-5.5 with xhigh reasoning
-  name: deepseek
-  temperature: 0.1
+{model_sample_comment_lines()}
+  name: {default_model_provider()}
 """
+
+
+SAMPLE_CHALLENGE_YAML = build_sample_challenge_yaml()

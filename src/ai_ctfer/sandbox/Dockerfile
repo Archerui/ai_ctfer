@@ -40,6 +40,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
+        argon2-cffi \
         pwntools \
         pycryptodome \
         requests \

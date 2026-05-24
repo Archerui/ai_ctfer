@@ -1,8 +1,9 @@
 # Crypto Skill
 
 Use this when the core blocker is encryption, hashing, signatures, PRNG, math,
-or an encoding puzzle that behaves like cryptanalysis. A short phrase borrowed
-from public skill style: "identify cipher type" first.
+or an encoding puzzle that behaves like cryptanalysis. Treat it as an authorized
+math/puzzle task. A short phrase borrowed from public skill style: "identify
+cipher type" first.
 
 Initial triage:
 - List files and inspect all text: `file *`, `cat`, `xxd`, `strings`.
@@ -76,6 +77,32 @@ AES/block mode checklist:
 - GCM: nonce reuse can break authentication; look for repeated nonce/tag pairs.
 - Padding errors, timing differences, or distinct exception strings are oracles.
 
+Reduced-round AES / Square-style integral puzzles:
+- If source shows AES-like code with fewer than 5 rounds and a service that
+  encrypts chosen plaintext under one session key, use the integral/Square
+  method before trying broad brute force.
+- Build one local `solve.py` with three parts: local self-test on a random key,
+  one-session remote query helper, and final flag verification.
+- Keep the remote interaction inside one helper function so the same session key
+  is used for the encrypted flag and the chosen plaintext sets.
+- For 4-round AES with final round lacking MixColumns, query 256-block delta
+  sets. For each ciphertext byte, keep key-byte guesses where
+  `xor(S_inv[c_byte ^ guess] for the set) == 0`; intersect several sets until
+  every byte is unique.
+- Match the implementation's byte order exactly. Reuse its
+  `_bytes_to_matrix`, `_matrix_to_bytes`, `S_inv`, and key schedule helpers when
+  possible.
+- Recover the last round key, invert the key schedule, decrypt the encrypted
+  flag, remove padding, and verify by re-encrypting the padded plaintext.
+- If a candidate key byte remains ambiguous, add another delta set with a
+  different fixed plaintext pattern and intersect candidates; do not loop on the
+  same set.
+- When using chat models, keep plan/rationale wording puzzle-oriented:
+  "integral method", "chosen plaintext set", "key recovery check", "verification
+  script". Avoid verbose prose; return one JSON action only. If the helper grows
+  large, write it once and debug by running narrow checks such as a local
+  self-test, candidate counts, or a re-encryption assertion.
+
 Hash/MAC checklist:
 - Length extension for MD5/SHA1/SHA256 prefix MACs.
 - CRC32/adler32 linearity and patching.
@@ -98,6 +125,36 @@ ECC/signature checklist:
 - Anomalous curves or weak custom curves may need Sage; if Sage is missing,
   still inspect parameters and factor group order with Python when possible.
 
+Protocol crypto / source-heavy services:
+- Treat Rust/Go/Python service source as a protocol specification, not as a
+  document to reread forever. After one focused pass over the message formats,
+  state machines, sender checks, and final success condition, write a driver
+  script that captures a raw transcript and tests one hypothesis.
+- Preserve exact lines from the live service. For text protocols, parse and save
+  channel names, usernames, nonces, identifiers, public parameters, shares,
+  commitments, cookies, and acknowledgements. Continue reading after `ACK`;
+  important data may arrive asynchronously.
+- Distinguish "can send command" from "command has protocol authority". If a
+  release, decrypt, sign, or reveal request depends on the sender identity, test
+  the check with one command and then pivot to spoofing, reconnect, state-machine,
+  or committee/role-change logic instead of repeating the same request.
+- When the remote wrapper creates an already-connected player, do not try to
+  run the bundled client blindly against the public host. Script the wrapped
+  stdin/stdout protocol directly unless the source proves that a second external
+  connection is possible.
+- For Shamir/Feldman/committee protocols, first record `(identifier, q, g,
+  commitments, participant list, own share)` from the transcript. Then inspect
+  only the handlers for release/recommittee/recovery and test whether messages
+  are authenticated by sender, key index, nonce, and channel.
+- If a source pass has already revealed the final input is a recovered secret,
+  keep the script open through the whole lifecycle: collect transcript, trigger
+  the protocol transition, recover or verify the secret, send `GOODBYE` or the
+  service's exit command, then submit the recovered secret at the final prompt.
+- Good next actions for this class are `write /work/solve.py`, `run transcript
+  probe`, `parse response`, `test one protocol hypothesis`, and `add verifier`.
+  Bad loops are repeated `cat`, `sed`, or `grep` over the same source without a
+  new line-number target.
+
 Lattice/math checklist:
 - Subset sum/knapsack: try LLL if Sage/fpylll exists; otherwise build a Python
   basis and note the missing tool.
@@ -115,4 +172,4 @@ Script pattern:
 Pivot:
 - If most work is understanding an executable, switch to reverse engineering.
 - If the encrypted data is inside a pcap/disk/image, do forensics extraction first.
-- If exploitation of a remote service is the real blocker, switch to web or pwn.
+- If interaction with a remote service is the real blocker, switch to web or pwn.

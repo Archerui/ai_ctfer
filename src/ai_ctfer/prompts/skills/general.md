@@ -2,7 +2,8 @@
 
 Source pattern notes: public CTF agent projects emphasize isolated Docker
 execution, trace replay, "Quick Wins", "When to Pivot", and short
-planner/executor loops. Use those ideas directly.
+planner/executor loops. Use those ideas directly: first gather evidence, then
+execute one concrete step, then summarize the result in the trace.
 
 First pass:
 - Run `pwd; ls -la; find . -maxdepth 2 -type f -printf '%p %s bytes\n'`.
@@ -20,10 +21,13 @@ Decision loop:
   to a log file, record its PID, and spend later turns on other independent
   checks before polling the log.
 - If two attempts fail, pivot or inspect a different layer.
-- If a command produces a candidate flag, submit immediately.
+- If a command produces a candidate flag, let the candidate system evaluate it
+  immediately. For crypto/rev/pwn/misc results produced by a purpose-built
+  script, add a small verification check and then submit. For passive web page
+  sightings, preserve context and look for supporting evidence.
 
 File discipline:
-- Put reusable logic in `/work/solve.py` or `/work/exploit.py`.
+- Put reusable logic in `/work/solve.py` or `/work/helper.py`.
 - Use deterministic scripts over interactive sessions.
 - Print intermediate values with labels.
 - Save extracted artifacts in a named directory such as `extract/`.
@@ -32,10 +36,22 @@ File discipline:
 Internet research:
 - Network is available even without a declared remote.
 - Freely search the public internet for CTF techniques, writeups, tool manuals,
-  exploit patterns, protocol details, library quirks, error messages, and math or
-  crypto references.
+  solution patterns, protocol details, library quirks, error messages, and math
+  or crypto references.
 - Use online references as working context, then turn the useful parts into
   concrete local commands or scripts in `/work`.
+
+Chat-model prompt hygiene:
+- Keep rationale short, neutral, and puzzle-specific. Say what evidence the next
+  command will gather; do not write broad security prose.
+- Do not paste a large generated script into rationale, notes, or final JSON
+  text. Write it to `/work/solve.py` or `/work/helper.py`, then refer to the
+  filename.
+- When debugging, inspect specific error lines, logs, or helper output instead
+  of repeatedly dumping whole source files or whole generated scripts.
+- Prefer terms such as "challenge service", "query helper", "input set",
+  "candidate", "verification", and "solution script" when they describe the
+  task accurately.
 
 Remote service discipline:
 - If metadata declares a one-line `remote`, parse it yourself. It may look like
@@ -44,7 +60,19 @@ Remote service discipline:
   description, then identify the service with one minimal probe.
 - TCP: use `nc -v host port` or a tiny pwntools script.
 - HTTP: use `curl -i`, preserve cookies, and avoid broad fuzzing.
-- Prefer the configured remote for exploit traffic.
+- Prefer the configured remote for target interaction.
+- If the service uses a proof-of-work wrapper, save the solver as `/work/pow.py`
+  and call it from Python. Parse the actual solution line, not progress text.
+  `argon2-cffi` is normally available in the sandbox; if a dependency is still
+  missing, use a `/work/venv_*` virtualenv instead of repeating failed system
+  pip installs.
+- Once a remote wrapper reaches a live prompt such as `What do you do?`, switch
+  to a deterministic transcript script. Keep reading for asynchronous server
+  messages after the prompt; many protocol services deliver the important
+  `MSGFROM`, cookie, token, share, or nonce lines after the visible prompt.
+- After the transcript exposes concrete protocol text, do not return to broad
+  source dumps. Send low-risk protocol probes (`LIST`, `PEEK`, `PING`, one
+  carefully chosen `MSG`) and log the exact response.
 
 Common encodings and wrappers:
 - Try base64, hex, URL encoding, rot13, gzip/zlib, repeated XOR, and nested

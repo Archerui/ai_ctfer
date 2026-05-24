@@ -56,9 +56,36 @@ def extract_json_object(text: str) -> str:
     return stripped
 
 
+def iter_json_objects(text: str):
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            yield value
+
+
 def parse_action(text: str) -> AgentAction:
-    data = json.loads(extract_json_object(text))
-    return ACTION_ADAPTER.validate_python(data)
+    errors: list[Exception] = []
+    try:
+        data = json.loads(extract_json_object(text))
+        return ACTION_ADAPTER.validate_python(data)
+    except Exception as exc:
+        errors.append(exc)
+
+    for data in iter_json_objects(text):
+        try:
+            return ACTION_ADAPTER.validate_python(data)
+        except Exception as exc:
+            errors.append(exc)
+
+    if errors:
+        raise errors[0]
+    raise ValueError("No JSON object found in model response")
 
 
 def action_schema_hint() -> str:

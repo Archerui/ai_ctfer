@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Protocol
 
-from openai import OpenAI
-
+from .model_interface import ChatCall, Message, call_chat_model, create_chat_client
 from .schema import LLMConfig
-
-
-Message = dict[str, str]
 
 
 class LLMClient(Protocol):
@@ -18,73 +13,49 @@ class LLMClient(Protocol):
         messages: list[Message],
         *,
         model: str,
-        temperature: float,
+        temperature: float | None,
         reasoning_effort: str | None = None,
     ) -> str:
         ...
 
 
 def create_llm_client(model_config: LLMConfig) -> LLMClient:
-    if model_config.provider == "gpt":
-        return OpenAIClient()
-    return DeepSeekClient()
+    return OpenAICompatibleClient(model_config.provider)
 
 
-class DeepSeekClient:
-    def __init__(self, api_key: str | None = None) -> None:
-        api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
-        if not api_key:
-            raise RuntimeError("DEEPSEEK_API_KEY is not set")
-        self.client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+class OpenAICompatibleClient:
+    def __init__(self, provider: str, api_key: str | None = None) -> None:
+        self.provider = provider
+        self.client = create_chat_client(provider, api_key)
 
     def complete(
         self,
         messages: list[Message],
         *,
         model: str,
-        temperature: float,
+        temperature: float | None,
         reasoning_effort: str | None = None,
     ) -> str:
-        response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            stream=False,
+        return call_chat_model(
+            self.client,
+            ChatCall(
+                provider=self.provider,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+            ),
         )
-        content = response.choices[0].message.content
-        if not content:
-            raise RuntimeError("DeepSeek returned an empty response")
-        return content
 
 
-class OpenAIClient:
+class DeepSeekClient(OpenAICompatibleClient):
     def __init__(self, api_key: str | None = None) -> None:
-        api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set")
-        self.client = OpenAI(api_key=api_key)
+        super().__init__("deepseek", api_key)
 
-    def complete(
-        self,
-        messages: list[Message],
-        *,
-        model: str,
-        temperature: float,
-        reasoning_effort: str | None = None,
-    ) -> str:
-        kwargs: dict[str, object] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": False,
-        }
-        if reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
-        response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content
-        if not content:
-            raise RuntimeError("OpenAI returned an empty response")
-        return content
+
+class OpenAIClient(OpenAICompatibleClient):
+    def __init__(self, api_key: str | None = None) -> None:
+        super().__init__("gpt", api_key)
 
 
 @dataclass
@@ -96,7 +67,7 @@ class StaticLLMClient:
         messages: list[Message],
         *,
         model: str,
-        temperature: float,
+        temperature: float | None,
         reasoning_effort: str | None = None,
     ) -> str:
         return self.response

@@ -24,7 +24,7 @@ from .candidates import (
 from .config import Language
 from .environment import detect_environment_issue
 from .executor import DockerExecutor
-from .files import copy_challenge_files, render_file_tree
+from .files import copy_challenge_files, render_file_tree, restore_previous_work_files
 from .flag import matches_flag
 from .i18n import plan_markdown, t
 from .llm import LLMClient
@@ -41,6 +41,8 @@ from .validation import CandidateValidationResult, parse_candidate_validation
 
 DEFAULT_PLANNING_STEPS = 50
 MAX_EXACT_COMMAND_REPEATS = 2
+MAX_PASSIVE_INSPECTION_STREAK = 8
+MAX_LIVE_PROTOCOL_PASSIVE_STREAK = 2
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 _VISIBLE_TEXT_RE = re.compile(r"[\w\u3400-\u9fff]", re.UNICODE)
 
@@ -101,9 +103,12 @@ class AgentLoop:
         self.language = language
         self.command_counts: dict[str, int] = {}
         self.repeated_command_skips = 0
+        self.passive_inspection_streak = 0
+        self.live_protocol_seen = False
         self.validated_candidate_revisions: set[tuple[str, int]] = set()
         self.notebook = Notebook.load(self.challenge_dir, self.challenge, self.language)
         self.environment_issue_reason: str | None = None
+        self.current_plan: PlanResult | None = None
 
     def _emit(self, event: str, **payload: Any) -> None:
         if self.on_event:
@@ -112,12 +117,18 @@ class AgentLoop:
     def run(self) -> SolveResult:
         self.notebook.start_run(self.logger.run_dir.name)
         copy_challenge_files(self.challenge_dir, self.logger.work_dir)
+        restored_files = restore_previous_work_files(
+            self.challenge_dir,
+            self.logger.run_dir,
+            self.logger.work_dir,
+        )
         self._emit("run_started", run_dir=self.logger.run_dir, work_dir=self.logger.work_dir)
         self.logger.log(
             "run_started",
             challenge=self.challenge.as_prompt_dict(),
             source_dir=self.challenge_dir,
             work_dir=self.logger.work_dir,
+            restored_files=[path.relative_to(self.logger.work_dir) for path in restored_files],
         )
 
         history: list[dict[str, Any]] = []
@@ -126,6 +137,13 @@ class AgentLoop:
             en="No commands have been run yet.",
             zh="尚未运行任何命令。",
         )
+        if restored_files:
+            names = ", ".join(str(path.relative_to(self.logger.work_dir)) for path in restored_files)
+            last_observation += "\n" + _message(
+                self.language,
+                en=f"Restored previous work-in-progress file(s): {names}. Inspect or run them before rebuilding from scratch.",
+                zh=f"已恢复上次运行的半成品文件：{names}。重新从零开始前，请先检查或运行它们。",
+            )
         planning_result, last_observation = self._run_planning_phase(
             history=history,
             last_observation=last_observation,
@@ -133,6 +151,7 @@ class AgentLoop:
         if self.environment_issue_reason:
             return self._environment_issue(self.environment_issue_reason)
         if planning_result:
+            self.current_plan = planning_result
             self.logger.write_plan(planning_result.to_markdown(self.language))
             self.logger.log("plan_set", plan=planning_result)
             self.notebook.record_plan(planning_result)
@@ -168,6 +187,7 @@ class AgentLoop:
                 history=history,
                 last_observation=last_observation,
                 remaining_steps=remaining_steps,
+                active_plan=self.current_plan,
                 flag_candidates=self.candidates.prompt_items(),
                 notebook=self.notebook.prompt_text(),
                 language=self.language,
@@ -226,6 +246,25 @@ class AgentLoop:
                         step=step,
                         action=action.model_dump(),
                         reason="repeated_command",
+                    )
+                    self._emit("command_skipped", phase="solve", step=step)
+                    continue
+                if passive_limit := self._passive_inspection_limit_observation(action.command):
+                    last_observation = passive_limit
+                    history.append(
+                        {
+                            "step": step,
+                            "action": "run_command_skipped",
+                            "command": action.command,
+                            "reason": "passive_inspection_streak",
+                            "rationale": action.rationale,
+                        }
+                    )
+                    self.logger.log(
+                        "command_skipped",
+                        step=step,
+                        action=action.model_dump(),
+                        reason="passive_inspection_streak",
                     )
                     self._emit("command_skipped", phase="solve", step=step)
                     continue
@@ -293,6 +332,8 @@ class AgentLoop:
                     candidate_values=[candidate.value for candidate in candidates],
                     environment_issue=environment_issue,
                 )
+                self._record_observation_kind(observation)
+                self._record_command_kind(action.command)
                 if environment_issue:
                     return self._environment_issue(environment_issue)
                 if candidates:
@@ -399,6 +440,7 @@ class AgentLoop:
 
             if isinstance(action, SetPlanAction):
                 plan = plan_from_action(action)
+                self.current_plan = plan
                 self.logger.write_plan(plan.to_markdown(self.language))
                 self.logger.log("plan_updated_during_solve", step=step, plan=plan)
                 last_observation = (
@@ -552,6 +594,26 @@ class AgentLoop:
                             ),
                         ), last_observation
                     continue
+                if passive_limit := self._passive_inspection_limit_observation(action.command):
+                    last_observation = passive_limit
+                    record = {
+                        "phase": "planning",
+                        "planning_step": planning_step,
+                        "action": "run_command_skipped",
+                        "command": action.command,
+                        "reason": "passive_inspection_streak",
+                        "rationale": action.rationale,
+                    }
+                    planning_history.append(record)
+                    history.append(record)
+                    self.logger.log(
+                        "planning_command_skipped",
+                        planning_step=planning_step,
+                        action=action.model_dump(),
+                        reason="passive_inspection_streak",
+                    )
+                    self._emit("command_skipped", phase="planning", step=planning_step)
+                    continue
                 self._record_command(action.command)
                 self._emit(
                     "command_start",
@@ -616,6 +678,8 @@ class AgentLoop:
                     candidate_values=[candidate.value for candidate in candidates],
                     environment_issue=environment_issue,
                 )
+                self._record_observation_kind(last_observation)
+                self._record_command_kind(action.command)
                 if environment_issue:
                     self.environment_issue_reason = environment_issue
                     return None, last_observation
@@ -762,6 +826,56 @@ class AgentLoop:
     def _record_command(self, command: str) -> None:
         fingerprint = _command_fingerprint(command)
         self.command_counts[fingerprint] = self.command_counts.get(fingerprint, 0) + 1
+
+    def _record_command_kind(self, command: str) -> None:
+        if is_passive_inspection_command(command):
+            self.passive_inspection_streak += 1
+        else:
+            self.passive_inspection_streak = 0
+
+    def _record_observation_kind(self, observation: str) -> None:
+        if has_live_protocol_observation(observation):
+            self.live_protocol_seen = True
+
+    def _passive_inspection_limit_observation(self, command: str) -> str | None:
+        if not is_passive_inspection_command(command):
+            return None
+        if (
+            self.live_protocol_seen
+            and self.passive_inspection_streak >= MAX_LIVE_PROTOCOL_PASSIVE_STREAK
+        ):
+            return _message(
+                self.language,
+                en=(
+                    "A live protocol transcript has already been observed. Stop broad "
+                    "source rereads and use the captured identifiers/messages to update "
+                    "the interaction script, keep reading asynchronous responses, or test "
+                    "one protocol hypothesis."
+                ),
+                zh=(
+                    "已经观察到 live protocol transcript。请停止泛读源码，改用已捕获的"
+                    "标识符和消息更新交互脚本，继续读取异步响应，或测试一个协议假设。"
+                ),
+            )
+        if self.passive_inspection_streak < MAX_PASSIVE_INSPECTION_STREAK:
+            return None
+        return _message(
+            self.language,
+            en=(
+                "The last several commands were passive source/file inspection. "
+                "Stop rereading the same surface. Use the existing observations "
+                "and active plan to write or run a concrete script, connect to the "
+                "service, test a hypothesis, or produce a focused verifier. If one "
+                "specific line range is truly missing, explain why it changes the "
+                "next implementation step."
+            ),
+            zh=(
+                "最近连续多条命令都只是被动阅读源码或文件。请停止重复阅读同一层信息。"
+                "使用已有观察和当前计划，改为编写或运行具体脚本、连接服务、验证假设，"
+                "或产出聚焦的校验命令。如果确实缺某个特定行范围，请说明它为什么会"
+                "改变下一步实现。"
+            ),
+        )
 
     def _repeated_command_observation(self, command: str) -> str | None:
         fingerprint = _command_fingerprint(command)
@@ -1259,3 +1373,78 @@ def _observation_excerpt(observation: str, max_chars: int = 1600) -> str:
 
 def _command_fingerprint(command: str) -> str:
     return " ".join(command.split())
+
+
+def is_passive_inspection_command(command: str) -> bool:
+    lower = command.lower()
+    active_markers = (
+        "cat >",
+        "tee ",
+        "> /work/",
+        "python3 solve",
+        "python solve",
+        "cargo run",
+        "cargo build",
+        "ncat",
+        " nc ",
+        "openssl s_client",
+        "socket.",
+        "pwntools",
+        "requests.",
+        "pip install",
+        "python3 -m venv",
+        "curl -ssl",
+    )
+    if any(marker in lower for marker in active_markers):
+        return False
+    passive_markers = (
+        "sed -n",
+        "nl -ba",
+        "grep -r",
+        "rg ",
+        "find ",
+        "strings ",
+        "file ",
+        "readelf ",
+        "objdump ",
+        "head ",
+        "cat ",
+        ".read_text",
+    )
+    if not any(marker in lower for marker in passive_markers):
+        return False
+    source_markers = (
+        ".rs",
+        ".py",
+        ".c",
+        ".h",
+        ".cpp",
+        ".go",
+        ".js",
+        ".ts",
+        ".java",
+        ".php",
+        "cargo.toml",
+        "dockerfile",
+        "challenge.yml",
+        "src/",
+        "common/",
+        "client/",
+        "network/",
+        "orchestrator/",
+    )
+    return any(marker in lower for marker in source_markers)
+
+
+def has_live_protocol_observation(observation: str) -> bool:
+    lower = observation.lower()
+    markers = (
+        "what do you do?",
+        "msgfrom ",
+        "welcome\n",
+        "joined ",
+        "users ",
+        "ack\n",
+        "solution? correct",
+    )
+    return any(marker in lower for marker in markers)

@@ -111,7 +111,7 @@ def adjudicator_system(language: Language) -> str:
         "target output, decrypt scripts, helper scripts, or explicit success "
         "labels. Reject examples, placeholders, flag format descriptions, and "
         "guesses. Also reject unverified decrypt-script outputs unless they have "
-        "round-trip, re-encryption, oracle, or sole-final-output evidence. Return "
+        "round-trip, re-encryption, challenge-service, or sole-final-output evidence. Return "
         "exactly one JSON action and no prose."
     )
 

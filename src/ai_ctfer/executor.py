@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import time
 import os
+import hashlib
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -13,6 +14,7 @@ from .schema import Remote
 
 
 DEFAULT_IMAGE_NAME = "ai-ctfer-sandbox:latest"
+SANDBOX_HASH_LABEL = "ai-ctfer.sandbox_hash"
 
 
 def docker_network_mode(_remote: Remote) -> str:
@@ -69,28 +71,31 @@ class DockerExecutor:
         if self._image_ready:
             return
         self.ensure_available()
-        inspect = subprocess.run(
-            ["docker", "image", "inspect", self.image_name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if inspect.returncode != 0:
-            with resources.as_file(
-                resources.files("ai_ctfer").joinpath("sandbox")
-            ) as sandbox_dir:
-                subprocess.run(
+        with resources.as_file(resources.files("ai_ctfer").joinpath("sandbox")) as sandbox_dir:
+            context_hash = sandbox_context_hash(sandbox_dir)
+            image_hash = inspect_image_context_hash(self.image_name)
+            if image_hash != context_hash:
+                build = subprocess.run(
                     [
                         "docker",
                         "build",
                         "-t",
                         self.image_name,
+                        "--label",
+                        f"{SANDBOX_HASH_LABEL}={context_hash}",
                         "-f",
                         str(sandbox_dir / "Dockerfile"),
                         str(sandbox_dir),
                     ],
-                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
                 )
+                if build.returncode != 0:
+                    output = (build.stdout or "") + (build.stderr or "")
+                    output, _ = truncate_text(output, 4000)
+                    raise RuntimeError(f"docker build failed:\n{output}")
         self._image_ready = True
 
     def run(
@@ -182,3 +187,37 @@ class DockerExecutor:
                 truncated=stdout_truncated or stderr_truncated,
                 guard_warnings=guard.warnings,
             )
+
+
+def inspect_image_context_hash(image_name: str) -> str | None:
+    completed = subprocess.run(
+        [
+            "docker",
+            "image",
+            "inspect",
+            "-f",
+            f"{{{{ index .Config.Labels \"{SANDBOX_HASH_LABEL}\" }}}}",
+            image_name,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    if not value or value == "<no value>":
+        return None
+    return value
+
+
+def sandbox_context_hash(sandbox_dir: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(p for p in sandbox_dir.rglob("*") if p.is_file()):
+        relative = path.relative_to(sandbox_dir).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()

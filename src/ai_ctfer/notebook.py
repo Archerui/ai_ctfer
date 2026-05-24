@@ -15,7 +15,7 @@ from .schema import Challenge
 NOTEBOOK_FILENAME = "ai-ctfer-notes.md"
 TARGET_MARKER_PREFIX = "<!-- ai-ctfer-current-targets:"
 TARGET_MARKER_SUFFIX = "-->"
-MAX_NOTEBOOK_PROMPT_CHARS = 14000
+MAX_NOTEBOOK_PROMPT_CHARS = 8000
 
 
 @dataclass
@@ -84,10 +84,29 @@ class Notebook:
         content = self.path.read_text(encoding="utf-8").strip()
         if len(content) <= MAX_NOTEBOOK_PROMPT_CHARS:
             return content
+        current_targets = extract_targets_from_challenge(self.challenge)
+        header = (
+            "# ai-ctfer notes\n\n"
+            + target_marker(current_targets)
+            + "\n\n"
+            + self._line(
+                en=(
+                    "Older notebook content is omitted from this prompt. Use the "
+                    "recent entries below as continuity, but do not repeat old "
+                    "source-reading loops. Current challenge.yml targets remain "
+                    "authoritative."
+                ),
+                zh=(
+                    "较早的笔记内容已从本次 prompt 省略。请把下面的近期记录作为延续，"
+                    "但不要重复旧的源码阅读循环。当前 challenge.yml 中的目标地址仍然优先。"
+                ),
+            )
+            + "\n\n...[older notebook content omitted]...\n\n"
+        )
+        budget = max(1000, MAX_NOTEBOOK_PROMPT_CHARS - len(header))
         return (
-            content[:3000].rstrip()
-            + "\n\n...[notebook middle truncated]...\n\n"
-            + content[-(MAX_NOTEBOOK_PROMPT_CHARS - 3040) :].lstrip()
+            header
+            + content[-budget:].lstrip()
         )
 
     def record_plan(self, plan: Any) -> None:

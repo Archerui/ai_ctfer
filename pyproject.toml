@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-ctfer"
+version = "0.1.0"
+description = "Single-challenge CTF solving agent with Docker sandbox execution."
+readme = "README.md"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+authors = [
+  {name = "ai-ctfer contributors"},
+]
+dependencies = [
+  "openai",
+  "pydantic>=2",
+  "pyyaml",
+  "typer",
+  "rich",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+
+[project.scripts]
+ai-ctfer = "ai_ctfer.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ai_ctfer = [
+  "prompts/*.md",
+  "prompts/skills/*.md",
+  "sandbox/Dockerfile",
+  "sandbox/rsa_factordb.py",
+]

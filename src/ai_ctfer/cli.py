@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import json
 import re
 import shutil
@@ -15,13 +14,14 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 
-from .artifacts import write_success_artifacts
+from .artifacts import load_trace_events, summarize_run_duration, write_success_artifacts
 from .clean import clean_ai_ctfer
 from .config import AppConfig, config_path, load_config, normalize_language, save_config
 from .executor import DockerExecutor
 from .i18n import display_language, phase_name, t
 from .llm import StaticLLMClient, create_llm_client
 from .loop import AgentLoop
+from .model_interface import model_names_help, provider_api_key_statuses
 from .schema import SAMPLE_CHALLENGE_YAML, load_challenge
 from .smoke import SMOKE_FLAG, SMOKE_HEX, write_smoke_challenge
 
@@ -70,26 +70,26 @@ def doctor(
 ) -> None:
     """Check local runtime prerequisites."""
     language = load_config().language
-    deepseek_key_ok = bool(os.environ.get("DEEPSEEK_API_KEY"))
-    openai_key_ok = bool(os.environ.get("OPENAI_API_KEY"))
+    key_statuses = provider_api_key_statuses()
+    any_llm_key_ok = any(status["ok"] for status in key_statuses)
     checks = [
         ("Python", sys.version.split()[0], True, True),
-        (
-            "DEEPSEEK_API_KEY",
-            t(language, "doctor_set") if deepseek_key_ok else t(language, "doctor_missing"),
-            deepseek_key_ok,
-            False,
-        ),
-        (
-            "OPENAI_API_KEY",
-            t(language, "doctor_set") if openai_key_ok else t(language, "doctor_missing"),
-            openai_key_ok,
-            False,
-        ),
+    ]
+    for status in key_statuses:
+        checks.append(
+            (
+                str(status["env"]),
+                t(language, "doctor_set") if status["ok"] else t(language, "doctor_missing"),
+                bool(status["ok"]),
+                False,
+            )
+        )
+    checks.extend(
+        [
         (
             "LLM API key",
-            _llm_key_status(deepseek_key_ok, openai_key_ok, language),
-            deepseek_key_ok or openai_key_ok,
+            _llm_key_status_from_provider_checks(key_statuses, language),
+            any_llm_key_ok,
             True,
         ),
         (
@@ -98,7 +98,8 @@ def doctor(
             bool(shutil.which("docker")),
             True,
         ),
-    ]
+        ]
+    )
 
     docker_version = t(language, "doctor_not_checked")
     docker_ok = False
@@ -178,7 +179,7 @@ def solve(
     ] = None,
     model: Annotated[
         str | None,
-        typer.Option("--model", help="Override schema model: deepseek or gpt."),
+        typer.Option("--model", help=f"Override schema model: {model_names_help()}."),
     ] = None,
     max_steps: Annotated[
         int | None,
@@ -215,7 +216,9 @@ def solve(
     ).run()
 
     if result.flag:
+        elapsed = summarize_run_duration(load_trace_events(result.run_dir), language)
         console.print(f"[green]{t(language, 'solved')}[/green] {result.flag}")
+        console.print(f"[green]{_message(language, en='Elapsed:', zh='总用时：')}[/green] {elapsed}")
         try:
             artifacts = write_success_artifacts(
                 challenge_dir=workdir,
@@ -349,6 +352,19 @@ def _llm_key_status(deepseek_key_ok: bool, openai_key_ok: bool, language) -> str
     if openai_key_ok:
         return t(language, "llm_key_openai")
     return t(language, "llm_key_missing")
+
+
+def _llm_key_status_from_provider_checks(statuses: list[dict], language) -> str:
+    available = [
+        f"{status['provider']} ({status['env']})"
+        for status in statuses
+        if status.get("ok")
+    ]
+    if not available:
+        return t(language, "llm_key_missing")
+    if language == "zh":
+        return "可用：" + ", ".join(available)
+    return "available: " + ", ".join(available)
 
 
 def _print_plan(plan, language) -> None:

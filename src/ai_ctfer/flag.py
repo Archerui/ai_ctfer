@@ -8,7 +8,7 @@ DEFAULT_FLAG_PATTERNS = [
     r"FLAG\{[^}\r\n]{1,512}\}",
     r"CTF\{[^}\r\n]{1,512}\}",
     r"[A-Za-z0-9_]+CTF\{[^}\r\n]{1,512}\}",
-    r"[A-Za-z0-9_]{2,32}\{[^}\r\n]{1,512}\}",
+    r"(?:(?<=\\n)|(?<![A-Za-z0-9_\\]))[A-Za-z0-9_]{2,32}\{[^}\r\n]{1,512}\}",
 ]
 
 PLACEHOLDER_INNERS = {
@@ -16,8 +16,14 @@ PLACEHOLDER_INNERS = {
     "example",
     "placeholder",
     "redacted",
+    "dummy",
+    "fake",
+    "fake_flag",
+    "local_test_flag",
     "your_flag",
     "your_flag_here",
+    "test_flag",
+    "not_the_flag",
 }
 
 

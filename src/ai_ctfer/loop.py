@@ -1138,19 +1138,27 @@ class AgentLoop:
         history: list[dict[str, Any]],
         last_observation: str,
     ) -> CandidateValidationResult | None:
-        response = self.llm.complete(
-            build_candidate_validation_messages(
-                challenge=self.challenge,
+        try:
+            response = self.llm.complete(
+                build_candidate_validation_messages(
+                    challenge=self.challenge,
+                    candidate=candidate.prompt_dict(),
+                    candidates=self.candidates.prompt_items(),
+                    history=history,
+                    last_observation=last_observation,
+                    language=self.language,
+                ),
+                model=self.challenge.model.api_model,
+                reasoning_effort=self.challenge.model.reasoning_effort,
+                temperature=0.0,
+            )
+        except Exception as exc:
+            self.logger.log(
+                "candidate_validation_failed",
                 candidate=candidate.prompt_dict(),
-                candidates=self.candidates.prompt_items(),
-                history=history,
-                last_observation=last_observation,
-                language=self.language,
-            ),
-            model=self.challenge.model.api_model,
-            reasoning_effort=self.challenge.model.reasoning_effort,
-            temperature=0.0,
-        )
+                error=str(exc),
+            )
+            return None
         self.logger.log(
             "candidate_validation_response",
             candidate=candidate.prompt_dict(),
@@ -1214,18 +1222,22 @@ class AgentLoop:
             self.logger.log_candidate(best, event="candidate_accepted")
             return self._candidate_success(best, reason)
 
-        response = self.llm.complete(
-            build_candidate_adjudication_messages(
-                challenge=self.challenge,
-                candidates=self.candidates.prompt_items(),
-                history=history,
-                last_observation=last_observation,
-                language=self.language,
-            ),
-            model=self.challenge.model.api_model,
-            reasoning_effort=self.challenge.model.reasoning_effort,
-            temperature=0.0,
-        )
+        try:
+            response = self.llm.complete(
+                build_candidate_adjudication_messages(
+                    challenge=self.challenge,
+                    candidates=self.candidates.prompt_items(),
+                    history=history,
+                    last_observation=last_observation,
+                    language=self.language,
+                ),
+                model=self.challenge.model.api_model,
+                reasoning_effort=self.challenge.model.reasoning_effort,
+                temperature=0.0,
+            )
+        except Exception as exc:
+            self.logger.log("candidate_adjudication_failed", error=str(exc))
+            return None
         self.logger.log("candidate_adjudication_response", response=response)
         try:
             action = parse_action(response)

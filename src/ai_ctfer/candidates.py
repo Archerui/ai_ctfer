@@ -236,7 +236,14 @@ def context_for_value(text: str, value: str, max_chars: int = 480, neighbor_line
         if value in line:
             start = max(0, index - neighbor_lines)
             end = min(len(lines), index + neighbor_lines + 1)
-            return compact_context("\n".join(lines[start:end]), max_chars)
+            context = "\n".join(lines[start:end])
+            if len(context) > max_chars:
+                local_index = context.find(value)
+                if local_index >= 0:
+                    window_start = max(0, local_index - max_chars // 2)
+                    window_end = min(len(context), local_index + len(value) + max_chars // 2)
+                    context = context[window_start:window_end]
+            return compact_context(context, max_chars)
     index = text.find(value)
     if index < 0:
         return ""
@@ -300,6 +307,9 @@ def score_candidate(
     if any(tool in lower_command for tool in ("grep", "strings", "ripgrep", "rg ")):
         score += 10
         reasons.append("produced by explicit flag search")
+    if direct_flag_file_read_command(lower_command):
+        score += 45
+        reasons.append("produced by direct challenge flag-file read")
 
     if active_solution_context(
         category=category,
@@ -360,6 +370,8 @@ def candidate_context_is_auto_acceptable(
     if context.strip() and re.fullmatch(DEFAULT_FLAG_LIKE_CONTEXT_RE, context.strip()):
         return True
     if strong_validation_context(context):
+        return True
+    if direct_flag_file_read_command(command) and contains_flag_like_context(context):
         return True
     if active_solution_context(
         category=category,
@@ -450,6 +462,44 @@ def active_solution_context(
         strong_validation_context(lower_context)
         or re.search(r"\b(flag|plaintext|decoded|decrypted|result)\b\s*[:=]", lower_context)
         or re.fullmatch(DEFAULT_FLAG_LIKE_CONTEXT_RE, lower_context.strip())
+        or (direct_flag_file_read_command(lower_command) and contains_flag_like_context(lower_context))
+    )
+
+
+def contains_flag_like_context(lower_context: str) -> bool:
+    return bool(DEFAULT_FLAG_LIKE_CONTEXT_RE.search(lower_context.strip()))
+
+
+def direct_flag_file_read_command(lower_command: str) -> bool:
+    if not lower_command:
+        return False
+    local_placeholder_setup = (
+        "echo " in lower_command
+        and "flag" in lower_command
+        and ("/work/" in lower_command or "local_test" in lower_command)
+    )
+    if local_placeholder_setup:
+        return False
+    readers = r"(?:cat|head|tail|strings|sed\s+-n)"
+    absolute_flag_paths = (
+        r"/home/[^\s;'\"|&]*/[^\s;'\"|&]*flag[^\s;'\"|&]*",
+        r"/flag[^\s;'\"|&]*",
+        r"/app/[^\s;'\"|&]*flag[^\s;'\"|&]*",
+        r"/challenge/[^\s;'\"|&]*flag[^\s;'\"|&]*",
+    )
+    if any(
+        re.search(rf"\b{readers}\b[^\n;|&]*{path}", lower_command)
+        for path in absolute_flag_paths
+    ):
+        return True
+    remote_markers = ("remote_cmd.py", " remote ", "remote(", " nc ", "ncat ", "socat ")
+    if not any(marker in lower_command for marker in remote_markers):
+        return False
+    return bool(
+        re.search(
+            rf"\b{readers}\b[^\n;|&]*\bflag(?:\.txt|\*)?(?=[\s'\";|&]|$)",
+            lower_command,
+        )
     )
 
 
@@ -495,6 +545,8 @@ def weak_evidence_context(lower_context: str, lower_command: str, category: str 
     weak_commands = ("cat ", "sed ", "head ", "tail ", "less ", "challenge.yml")
     context_is_weak = any(marker in lower_context for marker in weak_context_markers)
     command_is_weak = any(marker in lower_command for marker in weak_commands)
+    if direct_flag_file_read_command(lower_command):
+        command_is_weak = False
     return (
         context_is_weak
         or web_passive_evidence(category, lower_context, lower_command)

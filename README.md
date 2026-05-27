@@ -11,6 +11,8 @@ ai-ctfer init .
 ai-ctfer solve .
 ```
 
+Short aliases are also available: `ai-ctfer i` for `init`, `ai-ctfer s` for `solve`, and `ai-ctfer c` for `clean`.
+
 Set `DEEPSEEK_API_KEY` for `model.name: deepseek`, or `OPENAI_API_KEY` for
 `model.name: gpt`, before solving real challenges.
 
@@ -134,10 +136,10 @@ language follows `ai-ctfer language`.
 Cleanup examples:
 
 ```bash
-ai-ctfer clean . --runs          # remove .ai-ctfer and ai-ctfer-notes.md
-ai-ctfer clean . --image         # remove ai-ctfer-sandbox:latest
-ai-ctfer clean . --docker-cache  # prune Docker build cache
-ai-ctfer clean . --all
+ai-ctfer clean .                 # default: --all
+ai-ctfer clean . --runs          # only remove .ai-ctfer and ai-ctfer-notes.md
+ai-ctfer clean . --image         # only remove ai-ctfer-sandbox:latest
+ai-ctfer clean . --docker-cache  # only prune Docker build cache
 ```
 
 Cleanup does not remove `writeup.md` or generated solve scripts.
@@ -217,7 +219,7 @@ ai-ctfer doctor --strict
 Running `sudo ai-ctfer solve .` can work, but it is not recommended because
 generated files may become owned by `root`.
 
-### Why does `clean --all` fail with `unable to delete ai-ctfer-sandbox:latest`?
+### Why does `clean` fail with `unable to delete ai-ctfer-sandbox:latest`?
 
 This means Docker still has a container that references the sandbox image. The
 container may be stopped, but Docker still keeps the image locked until that

@@ -27,13 +27,10 @@ def clean_ai_ctfer(
     docker_cache: bool = False,
     all_targets: bool = False,
 ) -> CleanResult:
-    if all_targets:
+    if all_targets or not any([runs, image, docker_cache]):
         runs = image = docker_cache = True
 
     result = CleanResult()
-    if not any([runs, image, docker_cache]):
-        result.messages.append("nothing selected")
-        return result
 
     if runs:
         workdir = workdir.resolve()

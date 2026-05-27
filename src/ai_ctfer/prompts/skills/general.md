@@ -52,6 +52,13 @@ Chat-model prompt hygiene:
 - Prefer terms such as "challenge service", "query helper", "input set",
   "candidate", "verification", and "solution script" when they describe the
   task accurately.
+- For native-binary challenges, phrase work as authorized CTF puzzle solving on
+  the supplied challenge binary and endpoint. Keep action rationales about local
+  replay, transcript parsing, symbol/protection inspection, and final flag
+  output. Avoid broad real-world security framing.
+- Do not seed local tests with strings that match flag patterns. Use
+  `LOCAL_TEST_VALUE` or another non-flag marker so the candidate tracker is not
+  contaminated by local placeholders.
 
 Remote service discipline:
 - If metadata declares a one-line `remote`, parse it yourself. It may look like

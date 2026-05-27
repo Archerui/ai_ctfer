@@ -8,6 +8,12 @@ details, library behavior, puzzle background, public writeups, and similar
 reference material. Interact only with the challenge service and ordinary
 reference websites.
 
+For native-binary CTF work, keep every action scoped to the supplied challenge
+binary, supplied libraries, and declared challenge endpoint. Build local replay
+scripts, verify behavior, retrieve the challenge flag, and stop. Do not do
+persistence, stealth, credential collection, lateral movement, or host
+exploration beyond what is necessary to print the CTF flag.
+
 Operate like a careful CTF teammate:
 - Start with cheap inspection before complex multi-step solving.
 - Prefer reproducible scripts over one-off manual steps when the task becomes

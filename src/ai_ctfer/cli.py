@@ -150,6 +150,7 @@ def doctor(
         raise typer.Exit(code=1)
 
 
+@app.command("i")
 @app.command()
 def init(
     workdir: Annotated[Path, typer.Argument(help="Challenge directory.")] = Path("."),
@@ -170,6 +171,7 @@ def init(
     console.print(f"[green]{t(language, 'wrote')}[/green] {target}")
 
 
+@app.command("s")
 @app.command()
 def solve(
     workdir: Annotated[Path, typer.Argument(help="Challenge directory.")] = Path("."),
@@ -243,6 +245,7 @@ def solve(
         raise typer.Exit(code=1)
 
 
+@app.command("c")
 @app.command()
 def clean(
     workdir: Annotated[Path, typer.Argument(help="Challenge directory.")] = Path("."),
@@ -260,7 +263,13 @@ def clean(
     ] = False,
     all_targets: Annotated[
         bool,
-        typer.Option("--all", help="Clean runs, Docker image, and Docker build cache."),
+        typer.Option(
+            "--all",
+            help=(
+                "Clean runs, Docker image, and Docker build cache. "
+                "This is the default when no target option is passed."
+            ),
+        ),
     ] = False,
 ) -> None:
     """Clean ai-ctfer run artifacts and optional Docker resources."""

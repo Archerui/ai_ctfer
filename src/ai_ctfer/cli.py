@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -187,6 +188,10 @@ def solve(
         int | None,
         typer.Option("--max-steps", help="Override schema max step count."),
     ] = None,
+    planning_steps: Annotated[
+        int | None,
+        typer.Option("--planning-steps", help="Override planning phase step count."),
+    ] = None,
     fake_llm_response: Annotated[
         str | None,
         typer.Option(
@@ -207,6 +212,9 @@ def solve(
 
     llm = StaticLLMClient(fake_llm_response) if fake_llm_response else create_llm_client(challenge.model)
     executor = DockerExecutor()
+    loop_kwargs = {}
+    if planning_steps is not None:
+        loop_kwargs["planning_steps"] = planning_steps
     result = AgentLoop(
         challenge=challenge,
         challenge_dir=workdir,
@@ -215,6 +223,7 @@ def solve(
         on_plan=lambda plan: _print_plan(plan, language),
         on_event=lambda event, payload: _print_event(event, payload, language),
         language=language,
+        **loop_kwargs,
     ).run()
 
     if result.flag:
@@ -234,8 +243,8 @@ def solve(
                 f"[yellow]{_message(language, en='Solved, but artifact generation failed:', zh='已解出，但整理 writeup/脚本失败：')}[/yellow] {exc}"
             )
         else:
-            console.print(f"[green]{t(language, 'wrote')}[/green] {artifacts.writeup_path}")
-            console.print(f"[green]{t(language, 'wrote')}[/green] {artifacts.solve_path}")
+            console.print(f"[green]{t(language, 'wrote')}[/green] {_display_path(artifacts.writeup_path)}")
+            console.print(f"[green]{t(language, 'wrote')}[/green] {_display_path(artifacts.solve_path)}")
     else:
         console.print(f"[yellow]{t(language, 'finished_status')}[/yellow] {result.status}")
         if result.reason:
@@ -374,6 +383,13 @@ def _llm_key_status_from_provider_checks(statuses: list[dict], language) -> str:
     if language == "zh":
         return "可用：" + ", ".join(available)
     return "available: " + ", ".join(available)
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return os.path.relpath(path.resolve(), Path.cwd().resolve())
+    except Exception:
+        return path.name
 
 
 def _print_plan(plan, language) -> None:

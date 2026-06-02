@@ -17,3 +17,9 @@ test/
 tests/
 test-*/
 test_*/
+
+# Local benchmark datasets and generated runs
+Benchmark/NYU_CTF_Bench/
+Benchmark/workdirs/
+Benchmark/results/
+Benchmark/
